@@ -1,17 +1,18 @@
-# Grandma's Marathon Bus Pickup Finder
+# Duluth Race Shuttle Finder
 
-A small Streamlit app that helps visitors find the closest race-day bus pickup spot from a hotel, address, or GPS point.
+A streamlined Streamlit app that helps out-of-town race participants find a race-morning bus pickup from a hotel, lodging spot, or custom address.
 
-The app includes:
+The app now avoids relying on manually pinned hotel coordinates for nearest-pickup logic. With a Google Maps Platform key configured, it uses Google Routes API driving distance from the starting location to each bus pickup and shows embedded Google Maps routes.
 
-- Bus pickup locations with race/corral-specific recommended boarding windows
-- A nearest-pickup calculator using straight-line distance
-- Google Maps direction links for actual routing
-- An interactive Folium map with pickup spots and reviewed hotel/lodging pins
-- Return shuttle route notes
-- Other race-weekend transportation notes: bike valet, DTA, Port Town Trolley, skywalk, and Lakewalk
+## What it does
 
-> Important: Pickup coordinates have been aligned to the official Google Maps place links on the race transportation page, and each pickup row includes an official loading-site-map URL. Hotel coordinates have also been reviewed/updated, with source notes in `data/hotels.csv`; verify exact hotel driveways, parking notes, road closures, and race-day logistics before sharing publicly.
+- Lets a visitor choose their race and corral.
+- Lets a visitor choose a listed hotel/lodging spot or enter any custom address/place.
+- Ranks bus pickup spots by Google driving distance when `GOOGLE_MAPS_API_KEY` is configured.
+- Shows a Google Maps directions embed for the selected pickup.
+- Shows a Google-based pickup overview map whose marker positions are geocoded by Google from `google_maps_query` or `google_place_id`, not from the CSV latitude/longitude columns.
+- Keeps official loading-site PDF links next to each pickup.
+- Includes return shuttle and other transportation notes.
 
 ## Project structure
 
@@ -26,11 +27,10 @@ grandmas_bus_finder/
 │   ├── return_shuttle_routes.csv
 │   └── other_transportation.json
 ├── scripts/
-│   └── geocode_locations.py
+│   └── resolve_google_place_ids.py
 └── src/
     ├── data.py
-    ├── geo.py
-    └── maps.py
+    └── google_maps.py
 ```
 
 ## Quick start
@@ -42,80 +42,104 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Updating the data
+Without a Google Maps Platform key, the app still opens Google Maps direction links. Driving-distance ranking and embedded Google maps require a key.
 
-Most app changes can be made without touching Python code.
+## Google Maps setup
 
-### Pickup spots
+Create a Google Maps Platform API key and enable these APIs for the project:
+
+- **Routes API** — used for driving-distance ranking through Compute Route Matrix.
+- **Maps Embed API** — used for the selected route map inside Streamlit.
+- **Maps JavaScript API** — used for the pickup overview map.
+- **Places API (New)** — optional, only needed if you run `scripts/resolve_google_place_ids.py`.
+
+For local development, copy the example secrets file and add your real key:
+
+```bash
+cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+```
+
+Then edit `.streamlit/secrets.toml`:
+
+```toml
+GOOGLE_MAPS_API_KEY = "paste-your-google-maps-platform-key-here"
+```
+
+Do not commit `.streamlit/secrets.toml`. The `.gitignore` file already excludes it.
+
+For Streamlit Community Cloud, add the same key in the app's Secrets settings:
+
+```toml
+GOOGLE_MAPS_API_KEY = "paste-your-google-maps-platform-key-here"
+```
+
+## Why this version is better for map accuracy
+
+The earlier version used latitude/longitude columns for Folium pins. That was fragile because hotel pins and large venues can land slightly away from the driveway, entrance, or loading side that Google Maps would actually route to.
+
+This version uses these fields instead:
+
+- `google_maps_query`: the text query sent to Google, such as a hotel name plus address or a specific loading-side query like `JCPenney Miller Hill Mall 1600 Miller Trunk Highway Duluth MN 55811`.
+- `google_place_id`: optional but preferred. When present, the app uses the place ID for routing/maps instead of only the text query.
+
+The existing `latitude` and `longitude` columns can stay in the CSV for reference, but the main app no longer depends on them for nearest-pickup ranking.
+
+## Updating pickup spots
 
 Edit `data/pickup_locations.csv`.
 
-Key columns:
+Important columns:
 
-- `id`: stable machine-readable ID
-- `name`, `address`, `city`, `state`, `zip`
-- `latitude`, `longitude`
-- `half_corral_1`, `half_corral_2`, `half_corral_3`
-- `full_corral_a`, `full_corral_b`, `full_corral_c`
-- `loading_instructions`, `parking_info`, `best_for`, `access_notes`
-- `loading_site_map_url`: official PDF map for the race-morning loading zone
-- `coordinate_note`: note about how the pickup pin coordinate was chosen
+- `id`: stable machine-readable ID.
+- `name`, `address`, `city`, `state`, `zip`: displayed to users.
+- `google_maps_query`: Google routing/map query. Tune this when a marker or route lands in the wrong part of a large venue.
+- `google_place_id`: optional exact Google place ID. Leave blank until verified.
+- `google_query_note`: internal/public note explaining why the query was chosen.
+- `has_half_bus`, `has_full_bus`: controls which race sees the pickup.
+- `half_corral_1`, `half_corral_2`, `half_corral_3`, `full_corral_a`, `full_corral_b`, `full_corral_c`: recommended loading windows.
+- `loading_instructions`, `parking_info`, `best_for`, `access_notes`: displayed in pickup details.
+- `loading_site_map_url`: official loading-zone PDF link.
 
-### Hotels / lodging
+The `google_maps_query` values for several pickup locations intentionally aim for the loading side of the venue when the official notes are more specific than the mailing address.
+
+## Updating hotels/lodging
 
 Edit `data/hotels.csv`.
 
-The included hotel list mixes hotels from the provided return-shuttle notes with a few common downtown/Canal Park examples. Hotel pins were reviewed and corrected where better public lat/lon data was available. Some rows still use address-based/place coordinates, so exact hotel driveway/pickup points should still be verified before public launch.
+Important columns:
 
-You can add rows for any hotel, Airbnb landmark, campground, or neighborhood meeting point. The nearest-pickup calculator only needs `latitude` and `longitude`. The optional `coordinate_status` and `coordinate_notes` columns record whether a pin was updated from a public lat/lon source or checked against the address.
+- `name`, `address`, `city`, `state`, `zip`: displayed to users.
+- `google_maps_query`: Google routing/map query. Usually hotel name plus address.
+- `google_place_id`: optional exact Google place ID. This is the best way to avoid hotel pin drift.
+- `area`, `category`, `return_shuttle_group`, `notes`: displayed/context fields.
 
-### Return shuttles
+Hotel pins are hidden on the overview map by default to keep the app simpler. A user can toggle them on.
 
-Edit `data/return_shuttle_routes.csv`.
+## Optional: resolve Google place IDs
 
-Each row is one destination stop served by a return shuttle route.
-
-### Other transportation
-
-Edit `data/other_transportation.json`.
-
-This file powers the "Other transportation" tab.
-
-## Custom address lookup
-
-The app supports custom address entry through `geopy` and OpenStreetMap Nominatim. This is useful for a low-traffic prototype.
-
-For a public production app, consider replacing this with a commercial geocoder such as Google Maps, Mapbox, or HERE. You can store API keys in Streamlit secrets and update `src/geo.py`.
-
-Set a custom user agent if you deploy address lookup:
+After adding `GOOGLE_MAPS_API_KEY`, you can ask Google to resolve place IDs for the pickup or hotel CSVs:
 
 ```bash
-export GEOCODER_USER_AGENT="your-app-name-contact-email"
+export GOOGLE_MAPS_API_KEY="your-key"
+python scripts/resolve_google_place_ids.py --file data/pickup_locations.csv
+python scripts/resolve_google_place_ids.py --file data/hotels.csv
 ```
 
-## Refreshing coordinates
+Review every resolved row before publishing. The script marks rows as `resolved_needs_review` because the first Google result may not always be the exact venue, driveway, or loading side you want.
 
-A helper script is included to geocode rows in `data/hotels.csv` or `data/pickup_locations.csv`. For pickup spots, avoid overwriting the included coordinates unless you are intentionally replacing them; the pickup pins are aligned to the official race transportation Google Maps links, while the loading-site PDF links show the exact race-morning boarding areas.
+To refresh existing IDs:
 
 ```bash
-python scripts/geocode_locations.py --file data/hotels.csv --overwrite
-python scripts/geocode_locations.py --file data/pickup_locations.csv --overwrite
+python scripts/resolve_google_place_ids.py --file data/hotels.csv --overwrite
 ```
 
-The script uses Nominatim, waits between requests, and writes a `.bak` backup before replacing the CSV.
+## Deployment notes
 
-## Deploying on Streamlit Community Cloud
+- Keep the GitHub repo public or private as needed, but never commit the real Google Maps key.
+- On Streamlit Community Cloud, store `GOOGLE_MAPS_API_KEY` in Secrets.
+- Consider applying API key restrictions in Google Cloud, such as HTTP referrer restrictions for browser APIs and API restrictions to the specific Google Maps APIs used here.
+- Review Google Maps Platform billing/quotas before public launch.
 
-1. Push this folder to a GitHub repository.
-2. In Streamlit Community Cloud, create a new app from the repository.
-3. Set the main file path to `app.py`.
-4. Add any environment variables or secrets you need for production geocoding.
-5. Recheck the app on mobile, because many visitors will use this from a phone.
+## Important race-day disclaimer
 
-## Limitations to keep in mind
-
-- The nearest-pickup ranking uses straight-line distance, not driving time.
-- Google Maps direction links handle actual routing, closures, and travel mode.
-- Pickup pins represent official Google Maps place coordinates; the exact boarding area can be a driveway or parking-lot loading zone shown in the official PDF maps.
-- Hotel pins are loaded from `data/hotels.csv`; they were reviewed/corrected from public lat/lon or place sources where available, but exact driveways/property entrances should still be verified.
-- Official race logistics can change; keep the data files synced with the latest official information.
+Race-day transportation details, road closures, and loading zones can change. Before sharing the app publicly, verify all pickup instructions, loading windows, return shuttle stops, official loading-site PDF links, and road closure notes against the official race guide.
