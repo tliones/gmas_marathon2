@@ -50,6 +50,7 @@ def build_pickup_map(
         marker_lines = [
             str(row.get("full_address", "")),
             f"Recommended window: {time_windows.get(pickup_id, 'Select race/corral')}",
+            f"Loading: {row.get('loading_instructions', '')}",
             str(row.get("best_for", "")),
         ]
         popup = folium.Popup(_popup_html(str(row["name"]), marker_lines), max_width=340)

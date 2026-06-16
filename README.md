@@ -1,105 +1,121 @@
-"""Folium map construction for the bus pickup finder app."""
+# Grandma's Marathon Bus Pickup Finder
 
-from __future__ import annotations
+A small Streamlit app that helps visitors find the closest race-day bus pickup spot from a hotel, address, or GPS point.
 
-from html import escape
-from typing import Dict, Optional, Tuple
+The app includes:
 
-import folium
-import pandas as pd
+- Bus pickup locations with race/corral-specific recommended boarding windows
+- A nearest-pickup calculator using straight-line distance
+- Google Maps direction links for actual routing
+- An interactive Folium map with pickup spots and reviewed hotel/lodging pins
+- Return shuttle route notes
+- Other race-weekend transportation notes: bike valet, DTA, Port Town Trolley, skywalk, and Lakewalk
 
+> Important: Pickup coordinates have been aligned to the official Google Maps place links on the race transportation page, and each pickup row includes an official loading-site-map URL. Hotel coordinates have also been reviewed/updated, with source notes in `data/hotels.csv`; verify exact hotel driveways, parking notes, road closures, and race-day logistics before sharing publicly.
 
-DEFAULT_CENTER = (46.7867, -92.1005)  # Duluth waterfront-ish
+## Project structure
 
+```text
+grandmas_bus_finder/
+├── app.py
+├── requirements.txt
+├── README.md
+├── data/
+│   ├── pickup_locations.csv
+│   ├── hotels.csv
+│   ├── return_shuttle_routes.csv
+│   └── other_transportation.json
+├── scripts/
+│   └── geocode_locations.py
+└── src/
+    ├── data.py
+    ├── geo.py
+    └── maps.py
+```
 
-def _popup_html(title: str, lines: list[str]) -> str:
-    safe_title = escape(title)
-    safe_lines = "".join(f"<li>{escape(line)}</li>" for line in lines if str(line).strip())
-    return f"<strong>{safe_title}</strong><ul style='margin-left: 1rem; padding-left: 0.2rem;'>{safe_lines}</ul>"
+## Quick start
 
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-def build_pickup_map(
-    pickups: pd.DataFrame,
-    hotels: pd.DataFrame,
-    time_windows: Dict[str, str] | None = None,
-    origin: Optional[Tuple[float, float, str]] = None,
-    selected_pickup_id: Optional[str] = None,
-) -> folium.Map:
-    """Build an interactive Folium map.
+## Updating the data
 
-    origin should be a tuple of (lat, lon, label) when a user has selected or entered a
-    starting point.
-    """
-    time_windows = time_windows or {}
+Most app changes can be made without touching Python code.
 
-    if origin:
-        center = (origin[0], origin[1])
-        zoom_start = 11
-    elif not pickups.empty:
-        center = (float(pickups["latitude"].mean()), float(pickups["longitude"].mean()))
-        zoom_start = 10
-    else:
-        center = DEFAULT_CENTER
-        zoom_start = 10
+### Pickup spots
 
-    m = folium.Map(location=center, zoom_start=zoom_start, control_scale=True)
+Edit `data/pickup_locations.csv`.
 
-    pickup_group = folium.FeatureGroup(name="Bus pickup spots", show=True)
-    for _, row in pickups.iterrows():
-        pickup_id = str(row["id"])
-        marker_lines = [
-            str(row.get("full_address", "")),
-            f"Recommended window: {time_windows.get(pickup_id, 'Select race/corral')}",
-            f"Loading: {row.get('loading_instructions', '')}",
-            str(row.get("best_for", "")),
-        ]
-        popup = folium.Popup(_popup_html(str(row["name"]), marker_lines), max_width=340)
-        folium.Marker(
-            location=(float(row["latitude"]), float(row["longitude"])),
-            tooltip=str(row["name"]),
-            popup=popup,
-            icon=folium.Icon(color="red", icon="bus", prefix="fa"),
-        ).add_to(pickup_group)
-    pickup_group.add_to(m)
+Key columns:
 
-    hotel_group = folium.FeatureGroup(name="Hotels / lodging examples", show=True)
-    for _, row in hotels.dropna(subset=["latitude", "longitude"]).iterrows():
-        lines = [
-            str(row.get("full_address", "")),
-            f"Area: {row.get('area', '')}",
-            f"Return shuttle group: {row.get('return_shuttle_group', '')}",
-        ]
-        popup = folium.Popup(_popup_html(str(row["name"]), lines), max_width=340)
-        folium.Marker(
-            location=(float(row["latitude"]), float(row["longitude"])),
-            tooltip=str(row["name"]),
-            popup=popup,
-            icon=folium.Icon(color="blue", icon="bed", prefix="fa"),
-        ).add_to(hotel_group)
-    hotel_group.add_to(m)
+- `id`: stable machine-readable ID
+- `name`, `address`, `city`, `state`, `zip`
+- `latitude`, `longitude`
+- `half_corral_1`, `half_corral_2`, `half_corral_3`
+- `full_corral_a`, `full_corral_b`, `full_corral_c`
+- `loading_instructions`, `parking_info`, `best_for`, `access_notes`
+- `loading_site_map_url`: official PDF map for the race-morning loading zone
+- `coordinate_note`: note about how the pickup pin coordinate was chosen
 
-    if origin:
-        origin_lat, origin_lon, origin_label = origin
-        folium.Marker(
-            location=(origin_lat, origin_lon),
-            tooltip=origin_label,
-            popup=folium.Popup(escape(origin_label), max_width=260),
-            icon=folium.Icon(color="green", icon="map-marker", prefix="fa"),
-        ).add_to(m)
+### Hotels / lodging
 
-    if origin and selected_pickup_id:
-        match = pickups[pickups["id"].astype(str) == str(selected_pickup_id)]
-        if not match.empty:
-            row = match.iloc[0]
-            folium.PolyLine(
-                locations=[
-                    (origin[0], origin[1]),
-                    (float(row["latitude"]), float(row["longitude"])),
-                ],
-                tooltip="Straight-line distance only; open directions for actual route.",
-                weight=4,
-                opacity=0.8,
-            ).add_to(m)
+Edit `data/hotels.csv`.
 
-    folium.LayerControl(collapsed=False).add_to(m)
-    return m
+The included hotel list mixes hotels from the provided return-shuttle notes with a few common downtown/Canal Park examples. Hotel pins were reviewed and corrected where better public lat/lon data was available. Some rows still use address-based/place coordinates, so exact hotel driveway/pickup points should still be verified before public launch.
+
+You can add rows for any hotel, Airbnb landmark, campground, or neighborhood meeting point. The nearest-pickup calculator only needs `latitude` and `longitude`. The optional `coordinate_status` and `coordinate_notes` columns record whether a pin was updated from a public lat/lon source or checked against the address.
+
+### Return shuttles
+
+Edit `data/return_shuttle_routes.csv`.
+
+Each row is one destination stop served by a return shuttle route.
+
+### Other transportation
+
+Edit `data/other_transportation.json`.
+
+This file powers the "Other transportation" tab.
+
+## Custom address lookup
+
+The app supports custom address entry through `geopy` and OpenStreetMap Nominatim. This is useful for a low-traffic prototype.
+
+For a public production app, consider replacing this with a commercial geocoder such as Google Maps, Mapbox, or HERE. You can store API keys in Streamlit secrets and update `src/geo.py`.
+
+Set a custom user agent if you deploy address lookup:
+
+```bash
+export GEOCODER_USER_AGENT="your-app-name-contact-email"
+```
+
+## Refreshing coordinates
+
+A helper script is included to geocode rows in `data/hotels.csv` or `data/pickup_locations.csv`. For pickup spots, avoid overwriting the included coordinates unless you are intentionally replacing them; the pickup pins are aligned to the official race transportation Google Maps links, while the loading-site PDF links show the exact race-morning boarding areas.
+
+```bash
+python scripts/geocode_locations.py --file data/hotels.csv --overwrite
+python scripts/geocode_locations.py --file data/pickup_locations.csv --overwrite
+```
+
+The script uses Nominatim, waits between requests, and writes a `.bak` backup before replacing the CSV.
+
+## Deploying on Streamlit Community Cloud
+
+1. Push this folder to a GitHub repository.
+2. In Streamlit Community Cloud, create a new app from the repository.
+3. Set the main file path to `app.py`.
+4. Add any environment variables or secrets you need for production geocoding.
+5. Recheck the app on mobile, because many visitors will use this from a phone.
+
+## Limitations to keep in mind
+
+- The nearest-pickup ranking uses straight-line distance, not driving time.
+- Google Maps direction links handle actual routing, closures, and travel mode.
+- Pickup pins represent official Google Maps place coordinates; the exact boarding area can be a driveway or parking-lot loading zone shown in the official PDF maps.
+- Hotel pins are loaded from `data/hotels.csv`; they were reviewed/corrected from public lat/lon or place sources where available, but exact driveways/property entrances should still be verified.
+- Official race logistics can change; keep the data files synced with the latest official information.

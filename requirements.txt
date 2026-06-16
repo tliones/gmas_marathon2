@@ -1,1 +1,5 @@
-"""Grandma's Marathon bus pickup finder package."""
+streamlit>=1.35
+pandas>=2.2
+folium>=0.16
+streamlit-folium>=0.20
+geopy>=2.4
