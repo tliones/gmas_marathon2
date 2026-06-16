@@ -2,17 +2,35 @@
 
 A streamlined Streamlit app that helps out-of-town race participants find a race-morning bus pickup from a hotel, lodging spot, or custom address.
 
-The app now avoids relying on manually pinned hotel coordinates for nearest-pickup logic. With a Google Maps Platform key configured, it uses Google Routes API driving distance from the starting location to each bus pickup and shows embedded Google Maps routes.
+The app is now centered around a Google Maps overview showing bus pickup spots and hotel/lodging locations together. With a Google Maps Platform key configured, it ranks pickup spots by Google driving distance from the selected start location and shows an embedded Google route for the selected pickup.
 
 ## What it does
 
-- Lets a visitor choose their race and corral.
+- Shows a main Google map with all bus pickup spots and hotel/lodging locations.
+- Uses Google-resolved marker positions from place names, addresses, and optional place IDs instead of plotting CSV latitude/longitude pins.
 - Lets a visitor choose a listed hotel/lodging spot or enter any custom address/place.
+- Lets a visitor choose their race and corral.
 - Ranks bus pickup spots by Google driving distance when `GOOGLE_MAPS_API_KEY` is configured.
-- Shows a Google Maps directions embed for the selected pickup.
-- Shows a Google-based pickup overview map whose marker positions are geocoded by Google from `google_maps_query` or `google_place_id`, not from the CSV latitude/longitude columns.
+- Highlights the selected starting location and selected pickup on the main map.
+- Shows starting location and pickup location side by side for easier scanning.
+- Shows an embedded Google Maps route for the selected pickup.
 - Keeps official loading-site PDF links next to each pickup.
 - Includes return shuttle and other transportation notes.
+
+## Recent cleanup
+
+This version includes three UI fixes:
+
+1. The all-location map is back as the main item on the page.
+2. The selected route is organized as `Starting location` → `Pickup location` instead of being buried in tabs.
+3. Streamlit’s deprecated `use_container_width` argument has been replaced with `width="stretch"`.
+
+The map icons no longer use the old external `chart.googleapis.com` pin-image URL. They are now drawn as native Google Maps vector symbols, so they should render reliably as:
+
+- `P` = bus pickup
+- `H` = hotel/lodging
+- `S` = selected starting location
+- purple `P` = selected pickup route
 
 ## Project structure
 
@@ -42,7 +60,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Without a Google Maps Platform key, the app still opens Google Maps direction links. Driving-distance ranking and embedded Google maps require a key.
+Without a Google Maps Platform key, the app still opens Google Maps direction links. The main Google map, driving-distance ranking, and embedded route map require a key.
 
 ## Google Maps setup
 
@@ -50,8 +68,8 @@ Create a Google Maps Platform API key and enable these APIs for the project:
 
 - **Routes API** — used for driving-distance ranking through Compute Route Matrix.
 - **Maps Embed API** — used for the selected route map inside Streamlit.
-- **Maps JavaScript API** — used for the pickup overview map.
-- **Places API (New)** — optional, only needed if you run `scripts/resolve_google_place_ids.py`.
+- **Maps JavaScript API** — used for the main all-location map.
+- **Places API / Places Library** — used by the map to resolve hotel and venue names to Google place locations when a place ID is not stored.
 
 For local development, copy the example secrets file and add your real key:
 
@@ -75,14 +93,14 @@ GOOGLE_MAPS_API_KEY = "paste-your-google-maps-platform-key-here"
 
 ## Why this version is better for map accuracy
 
-The earlier version used latitude/longitude columns for Folium pins. That was fragile because hotel pins and large venues can land slightly away from the driveway, entrance, or loading side that Google Maps would actually route to.
+The earlier Folium version used latitude/longitude columns for map pins. That was fragile because hotel pins and large venues can land slightly away from the driveway, entrance, or loading side that Google Maps would actually route to.
 
 This version uses these fields instead:
 
 - `google_maps_query`: the text query sent to Google, such as a hotel name plus address or a specific loading-side query like `JCPenney Miller Hill Mall 1600 Miller Trunk Highway Duluth MN 55811`.
 - `google_place_id`: optional but preferred. When present, the app uses the place ID for routing/maps instead of only the text query.
 
-The existing `latitude` and `longitude` columns can stay in the CSV for reference, but the main app no longer depends on them for nearest-pickup ranking.
+The existing `latitude` and `longitude` columns can stay in the CSV for reference, but the main app does not depend on them for visible map pins or nearest-pickup ranking.
 
 ## Updating pickup spots
 
@@ -113,7 +131,7 @@ Important columns:
 - `google_place_id`: optional exact Google place ID. This is the best way to avoid hotel pin drift.
 - `area`, `category`, `return_shuttle_group`, `notes`: displayed/context fields.
 
-Hotel pins are hidden on the overview map by default to keep the app simpler. A user can toggle them on.
+Hotel markers are shown on the overview map by default. Users can turn them off with the `Show hotels` checkbox when they want a less crowded pickup-only view.
 
 ## Optional: resolve Google place IDs
 
@@ -137,7 +155,7 @@ python scripts/resolve_google_place_ids.py --file data/hotels.csv --overwrite
 
 - Keep the GitHub repo public or private as needed, but never commit the real Google Maps key.
 - On Streamlit Community Cloud, store `GOOGLE_MAPS_API_KEY` in Secrets.
-- Consider applying API key restrictions in Google Cloud, such as HTTP referrer restrictions for browser APIs and API restrictions to the specific Google Maps APIs used here.
+- Apply API key restrictions in Google Cloud, such as HTTP referrer restrictions for browser APIs and API restrictions to the specific Google Maps APIs used here.
 - Review Google Maps Platform billing/quotas before public launch.
 
 ## Important race-day disclaimer

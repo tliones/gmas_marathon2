@@ -3,7 +3,7 @@
 The app can run without a Google Maps Platform key, but these helpers unlock:
 - Google driving distance ranking with Routes API Compute Route Matrix
 - Google Maps Embed API directions maps
-- Google Maps URLs that use place IDs when available
+- Google Maps JavaScript API maps with Google-resolved marker positions
 """
 
 from __future__ import annotations
@@ -18,8 +18,6 @@ import pandas as pd
 import requests
 
 ROUTES_MATRIX_ENDPOINT = "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix"
-MAPS_SEARCH_BASE = "https://www.google.com/maps/search/?api=1"
-MAPS_DIRECTIONS_BASE = "https://www.google.com/maps/dir/?api=1"
 MAPS_EMBED_DIRECTIONS_BASE = "https://www.google.com/maps/embed/v1/directions"
 
 
@@ -229,6 +227,9 @@ def _marker_payload(df: pd.DataFrame, *, kind: str) -> list[dict[str, str]]:
     """Create JSON-safe marker payload for the client-side Google map."""
     payload: list[dict[str, str]] = []
     for _, row in df.iterrows():
+        note = clean_text(row.get("best_for")) if kind == "pickup" else clean_text(row.get("area"))
+        if kind == "hotel" and clean_text(row.get("return_shuttle_group")):
+            note = f"{note} · Return shuttle: {clean_text(row.get('return_shuttle_group'))}" if note else f"Return shuttle: {clean_text(row.get('return_shuttle_group'))}"
         payload.append(
             {
                 "id": clean_text(row.get("id")),
@@ -236,7 +237,7 @@ def _marker_payload(df: pd.DataFrame, *, kind: str) -> list[dict[str, str]]:
                 "query": row_location_query(row),
                 "place_id": row_place_id(row),
                 "address": clean_text(row.get("full_address")),
-                "note": clean_text(row.get("best_for")) or clean_text(row.get("area")),
+                "note": note,
                 "kind": kind,
             }
         )
@@ -248,92 +249,229 @@ def google_overview_map_html(
     api_key: str,
     pickups: pd.DataFrame,
     hotels: pd.DataFrame | None = None,
-    show_hotels: bool = False,
+    show_hotels: bool = True,
     selected_pickup_id: str = "",
-    height: int = 520,
+    selected_origin_id: str = "",
+    origin_query: str = "",
+    origin_label: str = "",
+    height: int = 620,
 ) -> str:
-    """Return HTML for a Google map that geocodes/display pickup and optional hotel markers.
+    """Return HTML for a Google map showing pickup and hotel/lodging markers.
 
-    This uses Google Maps JavaScript API in the browser and geocodes each row's
-    `google_place_id` or `google_maps_query`, so the visible marker positions come
-    from Google rather than the CSV latitude/longitude columns.
+    Marker positions are resolved in the browser with Google Maps JavaScript:
+    - `google_place_id` when present
+    - Places text search from `google_maps_query` when possible
+    - Geocoder fallback from `google_maps_query`
+
+    This avoids using the CSV latitude/longitude values for display pins.
     """
     marker_data = _marker_payload(pickups, kind="pickup")
     if show_hotels and hotels is not None:
         marker_data.extend(_marker_payload(hotels, kind="hotel"))
 
-    marker_json = json.dumps(marker_data, ensure_ascii=False)
-    selected_pickup_id = html.escape(clean_text(selected_pickup_id), quote=True)
-    api_key_escaped = quote_plus(clean_text(api_key))
+    selected_origin_id = clean_text(selected_origin_id)
+    origin_query = clean_text(origin_query)
+    origin_label = clean_text(origin_label) or "Starting location"
+    existing_marker_ids = {item["id"] for item in marker_data}
+    if origin_query and (not selected_origin_id or selected_origin_id not in existing_marker_ids):
+        selected_origin_id = selected_origin_id or "__custom_origin__"
+        marker_data.append(
+            {
+                "id": selected_origin_id,
+                "name": origin_label,
+                "query": origin_query,
+                "place_id": "",
+                "address": origin_query,
+                "note": "Selected starting location",
+                "kind": "origin",
+            }
+        )
 
-    return f"""
-<div id="google-map" style="height:{height}px;width:100%;border-radius:14px;border:1px solid #ddd;"></div>
-<div id="map-status" style="font: 13px Arial, sans-serif; color:#555; margin-top:6px;"></div>
+    replacements = {
+        "__HEIGHT__": html.escape(str(int(height)), quote=True),
+        "__MARKER_JSON__": json.dumps(marker_data, ensure_ascii=False),
+        "__SELECTED_PICKUP_ID__": json.dumps(clean_text(selected_pickup_id), ensure_ascii=False),
+        "__SELECTED_ORIGIN_ID__": json.dumps(selected_origin_id, ensure_ascii=False),
+        "__API_KEY__": quote_plus(clean_text(api_key)),
+    }
+
+    template = r"""
+<div id="bus-finder-map-wrap" style="width:100%;">
+  <div id="google-map" style="height:__HEIGHT__px;width:100%;border-radius:16px;border:1px solid #d7d7d7;"></div>
+  <div id="map-status" style="font:13px Arial,sans-serif;color:#555;margin-top:7px;">Loading Google map markers…</div>
+</div>
 <script>
-const markerData = {marker_json};
-const selectedPickupId = "{selected_pickup_id}";
-function initBusFinderMap() {{
-  const duluth = {{ lat: 46.7867, lng: -92.1005 }};
-  const map = new google.maps.Map(document.getElementById("google-map"), {{
+const markerData = __MARKER_JSON__;
+const selectedPickupId = __SELECTED_PICKUP_ID__;
+const selectedOriginId = __SELECTED_ORIGIN_ID__;
+
+function initBusFinderMap() {
+  const duluth = { lat: 46.7867, lng: -92.1005 };
+  const map = new google.maps.Map(document.getElementById("google-map"), {
     zoom: 10,
     center: duluth,
     mapTypeControl: false,
     streetViewControl: false,
     fullscreenControl: true,
-  }});
+  });
   const geocoder = new google.maps.Geocoder();
+  const placesService = google.maps.places ? new google.maps.places.PlacesService(map) : null;
   const bounds = new google.maps.LatLngBounds();
   const infoWindow = new google.maps.InfoWindow();
   let added = 0;
   let failed = 0;
+  let processed = 0;
 
-  function pinIcon(kind, selected) {{
-    const color = selected ? "DA291C" : (kind === "pickup" ? "C62828" : "1565C0");
-    return {{
-      url: "https://chart.googleapis.com/chart?chst=d_map_pin_letter&chld=" + (kind === "pickup" ? "B" : "H") + "|" + color + "|FFFFFF",
-      scaledSize: new google.maps.Size(30, 48),
-    }};
-  }}
+  function markerVisual(item, isSelectedPickup, isSelectedOrigin) {
+    let color = "#1565C0";
+    let label = "H";
+    let scale = 9;
+    if (item.kind === "pickup") {
+      color = "#C62828";
+      label = "P";
+    }
+    if (item.kind === "origin" || isSelectedOrigin) {
+      color = "#2E7D32";
+      label = "S";
+      scale = 12;
+    }
+    if (isSelectedPickup) {
+      color = "#6A1B9A";
+      label = "P";
+      scale = 12;
+    }
+    return {
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        fillColor: color,
+        fillOpacity: 0.95,
+        strokeColor: "#FFFFFF",
+        strokeWeight: 2,
+        scale: scale,
+      },
+      label: {
+        text: label,
+        color: "#FFFFFF",
+        fontSize: isSelectedPickup || isSelectedOrigin ? "13px" : "11px",
+        fontWeight: "700",
+      },
+    };
+  }
 
-  function addMarker(item) {{
-    const request = item.place_id ? {{ placeId: item.place_id }} : {{ address: item.query }};
-    geocoder.geocode(request, (results, status) => {{
-      if (status === "OK" && results && results[0]) {{
-        const position = results[0].geometry.location;
-        const isSelected = item.id === selectedPickupId;
-        const marker = new google.maps.Marker({{
-          map: map,
-          position: position,
-          title: item.name,
-          icon: pinIcon(item.kind, isSelected),
-          zIndex: isSelected ? 1000 : (item.kind === "pickup" ? 500 : 100),
-        }});
-        const mapsUrl = "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(item.query) + (item.place_id ? "&query_place_id=" + encodeURIComponent(item.place_id) : "");
-        const kindLabel = item.kind === "pickup" ? "Bus pickup" : "Hotel";
-        const content = `<div style="font-family:Arial,sans-serif;max-width:280px;line-height:1.35;">
-          <strong>${{item.name}}</strong><br>
-          <span>${{kindLabel}}</span><br>
-          <span>${{item.address || item.query}}</span><br>
-          ${{item.note ? `<span>${{item.note}}</span><br>` : ""}}
-          <a target="_blank" rel="noopener" href="${{mapsUrl}}">Open in Google Maps</a>
-        </div>`;
-        marker.addListener("click", () => {{
-          infoWindow.setContent(content);
-          infoWindow.open(map, marker);
-        }});
-        bounds.extend(position);
-        added += 1;
-        if (added === 1) {{ map.setCenter(position); }}
-        if (added > 1) {{ map.fitBounds(bounds); }}
-      }} else {{
-        failed += 1;
-        console.warn("Geocode failed", item.name, status);
-      }}
-      document.getElementById("map-status").innerText = `${{added}} markers placed from Google; ${{failed}} not found.`;
-    }});
-  }}
-  markerData.forEach(addMarker);
-}}
+  function statusText() {
+    const legend = "P = pickup · H = hotel/lodging · S = selected start";
+    return `${added} markers placed from Google locations; ${failed} not found. ${legend}`;
+  }
+
+  function mapsUrlFor(item, resolvedPlaceId) {
+    const placeId = item.place_id || resolvedPlaceId || "";
+    return "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(item.query || item.name) + (placeId ? "&query_place_id=" + encodeURIComponent(placeId) : "");
+  }
+
+  function addResolvedMarker(item, resolved) {
+    const isSelectedPickup = item.kind === "pickup" && item.id === selectedPickupId;
+    const isSelectedOrigin = item.id === selectedOriginId;
+    const visual = markerVisual(item, isSelectedPickup, isSelectedOrigin);
+    const zIndex = isSelectedOrigin ? 1200 : (isSelectedPickup ? 1100 : (item.kind === "pickup" ? 700 : 300));
+    const marker = new google.maps.Marker({
+      map: map,
+      position: resolved.location,
+      title: item.name,
+      icon: visual.icon,
+      label: visual.label,
+      zIndex: zIndex,
+    });
+    const kindLabel = isSelectedOrigin ? "Selected start" : (item.kind === "pickup" ? "Bus pickup" : "Hotel/lodging");
+    const addressLine = resolved.formattedAddress || item.address || item.query;
+    const mapsUrl = mapsUrlFor(item, resolved.placeId || "");
+    const content = `<div style="font-family:Arial,sans-serif;max-width:310px;line-height:1.35;">
+      <strong>${item.name}</strong><br>
+      <span>${kindLabel}</span><br>
+      <span>${addressLine}</span><br>
+      ${item.note ? `<span>${item.note}</span><br>` : ""}
+      <a target="_blank" rel="noopener" href="${mapsUrl}">Open in Google Maps</a>
+    </div>`;
+    marker.addListener("click", () => {
+      infoWindow.setContent(content);
+      infoWindow.open(map, marker);
+    });
+    bounds.extend(resolved.location);
+    added += 1;
+    if (added === 1) {
+      map.setCenter(resolved.location);
+    }
+    if (added > 1) {
+      map.fitBounds(bounds, 54);
+    }
+  }
+
+  function finish(item, resolved, sourceStatus) {
+    processed += 1;
+    if (resolved && resolved.location) {
+      addResolvedMarker(item, resolved);
+    } else {
+      failed += 1;
+      console.warn("Map marker could not be resolved", item.name, sourceStatus);
+    }
+    document.getElementById("map-status").innerText = statusText();
+    if (processed === markerData.length && added === 0) {
+      document.getElementById("map-status").innerText = "No markers could be placed. Check API restrictions and enabled Google Maps APIs.";
+    }
+  }
+
+  function geocodeItem(item, statusPrefix) {
+    const request = item.place_id ? { placeId: item.place_id } : { address: item.query };
+    geocoder.geocode(request, (results, status) => {
+      if (status === "OK" && results && results[0] && results[0].geometry) {
+        finish(item, {
+          location: results[0].geometry.location,
+          formattedAddress: results[0].formatted_address || "",
+          placeId: results[0].place_id || "",
+        }, statusPrefix + " geocoder OK");
+      } else {
+        finish(item, null, statusPrefix + " geocoder " + status);
+      }
+    });
+  }
+
+  function resolveItem(item) {
+    if (item.place_id) {
+      geocodeItem(item, "place_id");
+      return;
+    }
+    if (placesService && item.query) {
+      placesService.findPlaceFromQuery(
+        {
+          query: item.query,
+          fields: ["name", "geometry", "formatted_address", "place_id"],
+        },
+        (results, status) => {
+          if (status === "OK" && results && results[0] && results[0].geometry) {
+            finish(item, {
+              location: results[0].geometry.location,
+              formattedAddress: results[0].formatted_address || "",
+              placeId: results[0].place_id || "",
+            }, "places OK");
+          } else {
+            geocodeItem(item, "places " + status + "; fallback");
+          }
+        }
+      );
+    } else {
+      geocodeItem(item, "no places service");
+    }
+  }
+
+  if (!markerData.length) {
+    document.getElementById("map-status").innerText = "No map locations are configured.";
+    return;
+  }
+  markerData.forEach(resolveItem);
+}
 </script>
-<script async defer src="https://maps.googleapis.com/maps/api/js?key={api_key_escaped}&callback=initBusFinderMap"></script>
+<script async defer src="https://maps.googleapis.com/maps/api/js?key=__API_KEY__&libraries=places&callback=initBusFinderMap"></script>
 """
+
+    for key, value in replacements.items():
+        template = template.replace(key, value)
+    return template

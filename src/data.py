@@ -59,7 +59,7 @@ def load_pickups() -> pd.DataFrame:
 
 
 def load_hotels() -> pd.DataFrame:
-    """Load starter hotel/lodging data."""
+    """Load hotel/lodging data."""
     df = _read_csv("hotels.csv")
     for col in ["latitude", "longitude"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
