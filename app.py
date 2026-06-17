@@ -18,6 +18,7 @@ from src.data import (
 from src.google_maps import (
     clean_text,
     compute_driving_matrix,
+    compute_route_polyline,
     google_maps_directions_url,
     google_maps_search_url,
     google_overview_map_html,
@@ -26,6 +27,7 @@ from src.google_maps import (
     row_location_query,
     row_place_id,
     row_routing_query,
+    row_visual_route_query,
 )
 
 st.set_page_config(
@@ -36,7 +38,7 @@ st.set_page_config(
 
 # Bump this when route-ranking inputs change so Streamlit Cloud does not reuse
 # old Google route matrix results from earlier app versions.
-ROUTE_CACHE_VERSION = "2026-06-17-query-route-drawing-v5"
+ROUTE_CACHE_VERSION = "2026-06-17-server-polyline-v6"
 
 
 @st.cache_data(show_spinner=False)
@@ -101,6 +103,43 @@ def cached_route_matrix(
         }
         for result in results
     ]
+
+
+@st.cache_data(ttl=60 * 60, show_spinner="Drawing selected route...")
+def cached_selected_route_polyline(
+    api_key: str,
+    cache_version: str,
+    origin_query: str,
+    origin_place_id: str,
+    destination_query: str,
+    destination_place_id: str,
+    traffic_aware: bool,
+) -> dict[str, Any]:
+    """Cached wrapper for the selected Google Routes API polyline.
+
+    For the visual line, use query/place input only. Coordinates are excellent
+    for ranking, but for broad venues such as DECC they can snap to the wrong
+    access road and make the overview route look strange.
+    """
+    _ = cache_version
+    result = compute_route_polyline(
+        api_key=api_key,
+        origin_query=origin_query,
+        origin_place_id=origin_place_id,
+        destination_query=destination_query,
+        destination_place_id=destination_place_id,
+        origin_latitude="",
+        origin_longitude="",
+        destination_latitude="",
+        destination_longitude="",
+        traffic_aware=traffic_aware,
+    )
+    return {
+        "encoded_polyline": result.encoded_polyline,
+        "distance_miles": result.distance_miles,
+        "duration_minutes": result.duration_minutes,
+        "error": result.error,
+    }
 
 
 def get_google_maps_api_key() -> str:
@@ -205,13 +244,14 @@ def enrich_pickups_for_display(
         axis=1,
     )
     display["destination_query"] = display.apply(row_routing_query, axis=1)
+    display["destination_visual_route_query"] = display.apply(row_visual_route_query, axis=1)
     display["destination_map_query"] = display.apply(row_location_query, axis=1)
     display["destination_place_id"] = display.apply(row_place_id, axis=1)
     display["directions_url"] = display.apply(
         lambda row: google_maps_directions_url(
             origin_query=origin_query,
-            destination_query=row["destination_query"],
-            destination_place_id=row["destination_place_id"],
+            destination_query=row["destination_visual_route_query"],
+            destination_place_id="" if clean_text(row.get("id")) == "decc_bus" else row["destination_place_id"],
         ),
         axis=1,
     )
@@ -253,37 +293,6 @@ def apply_origin_guardrails(ranked: pd.DataFrame, search: dict[str, Any]) -> pd.
         return adjusted.drop(columns=["area_guardrail_sort"]).reset_index(drop=True)
 
     return ranked.reset_index(drop=True)
-
-
-def visual_route_waypoints(search: dict[str, Any] | None, selected_row: pd.Series | None) -> list[dict[str, Any]]:
-    """Return optional non-stopover waypoints for browser-side route drawing.
-
-    Google Maps JavaScript Directions can occasionally snap DECC's broad venue
-    address to an awkward approach road. For Canal Park / downtown starts going
-    to DECC, this lightweight via point nudges the visual route onto the short
-    Lake Avenue / Harbor Drive approach that users see in normal Google Maps.
-
-    These waypoints affect only the purple route drawn on the map; the ranking
-    table still uses Google Route Matrix distances.
-    """
-    if not search or selected_row is None:
-        return []
-    if clean_text(selected_row.get("id")) != "decc_bus":
-        return []
-
-    origin_text = " ".join(
-        clean_text(search.get(key))
-        for key in ["origin_area", "origin_label", "origin_query", "origin_address"]
-    ).lower()
-    if not any(term in origin_text for term in ["canal park", "downtown", "lake avenue", "waterfront", "pier b"]):
-        return []
-
-    return [
-        {
-            "query": "South Lake Avenue and Harbor Drive, Duluth, MN 55802",
-            "stopover": False,
-        }
-    ]
 
 
 def render_iframe(src: str, height: int = 620) -> None:
@@ -570,7 +579,7 @@ def main() -> None:
 
     with map_col:
         st.subheader("Map")
-        st.caption("Pickup and hotel markers are resolved by Google Maps. The purple route uses Google Maps directions; distance ranking still uses Google Route Matrix.")
+        st.caption("Pickup and hotel markers are resolved by Google Maps. The purple route is drawn from Google Routes API route geometry; distance ranking uses Google Route Matrix.")
         if api_key:
             route_origin_query = ""
             route_origin_place_id = ""
@@ -581,17 +590,32 @@ def main() -> None:
             route_destination_latitude = ""
             route_destination_longitude = ""
             route_waypoints: list[dict[str, Any]] = []
+            route_polyline = ""
             if search and selected_row is not None:
-                route_origin_query = search.get("origin_map_query") or search.get("origin_query", "")
+                route_origin_query = search.get("origin_query") or search.get("origin_map_query", "")
                 route_origin_place_id = search.get("origin_place_id", "")
-                route_origin_latitude = search.get("origin_latitude", "")
-                route_origin_longitude = search.get("origin_longitude", "")
-                dest_lat, dest_lng = row_lat_lng(selected_row)
-                route_destination_query = clean_text(selected_row.get("destination_map_query")) or clean_text(selected_row.get("destination_query"))
-                route_destination_place_id = clean_text(selected_row.get("destination_place_id"))
-                route_destination_latitude = dest_lat
-                route_destination_longitude = dest_lng
-                route_waypoints = visual_route_waypoints(search, selected_row)
+                route_origin_latitude = ""
+                route_origin_longitude = ""
+                route_destination_query = clean_text(selected_row.get("destination_visual_route_query")) or clean_text(selected_row.get("destination_query"))
+                route_destination_place_id = "" if clean_text(selected_row.get("id")) == "decc_bus" else clean_text(selected_row.get("destination_place_id"))
+                route_destination_latitude = ""
+                route_destination_longitude = ""
+                route_waypoints = []
+                try:
+                    selected_route = cached_selected_route_polyline(
+                        api_key,
+                        ROUTE_CACHE_VERSION,
+                        route_origin_query,
+                        route_origin_place_id,
+                        route_destination_query,
+                        route_destination_place_id,
+                        bool(search.get("traffic_aware", False)),
+                    )
+                    route_polyline = clean_text(selected_route.get("encoded_polyline"))
+                    if not route_polyline and clean_text(selected_route.get("error")):
+                        st.warning(f"Selected route could not be drawn: {selected_route['error']}")
+                except Exception as exc:
+                    st.warning(f"Selected route could not be drawn on the map. The Directions button still works. Details: {exc}")
 
             overview_html = google_overview_map_html(
                 api_key=api_key,
@@ -613,6 +637,7 @@ def main() -> None:
                 route_destination_latitude=route_destination_latitude,
                 route_destination_longitude=route_destination_longitude,
                 route_waypoints=route_waypoints,
+                route_polyline=route_polyline,
                 height=700,
             )
             render_iframe(overview_html, height=740)
@@ -624,7 +649,7 @@ def main() -> None:
     if not search:
         st.caption("Choose a starting location to sort this table by Google driving distance.")
     else:
-        st.caption("Sorted by Google driving distance when available. The table uses Google Route Matrix; the map route uses Google Maps directions for a more familiar route preview.")
+        st.caption("Sorted by Google driving distance when available. The table uses Google Route Matrix; the map route uses Google Routes API geometry.")
     render_rank_table(ranked, show_distance=show_distance)
 
     with st.expander("Return shuttles and other transportation"):

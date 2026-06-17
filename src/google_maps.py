@@ -3,7 +3,7 @@
 The app can run without a Google Maps Platform key, but these helpers unlock:
 - Google driving-distance ranking with Routes API Compute Route Matrix
 - Google Maps JavaScript maps with Google-resolved marker positions
-- Google Maps JavaScript DirectionsRenderer route drawing on the main map
+- Routes API selected-route polylines drawn on the main Google map
 """
 
 from __future__ import annotations
@@ -107,17 +107,31 @@ def row_location_query(row: pd.Series) -> str:
 
 
 def row_routing_query(row: pd.Series) -> str:
-    """Return the preferred Google routing query for a row.
+    """Return the preferred Google routing query for ranking and route links.
 
     Large sites can use a precise display/search query for map markers and a more
     stable official address for routing. If latitude/longitude are available, the
     route ranking code uses those coordinates first; this query remains useful for
-    Google Maps URLs and browser-side DirectionsRenderer route drawing.
+    Google Maps URLs.
     """
     query = clean_text(row.get("routing_query"))
     if query:
         return query
     return row_location_query(row)
+
+
+def row_visual_route_query(row: pd.Series) -> str:
+    """Return the address/query used for the selected route polyline.
+
+    This is intentionally separate from marker placement and distance ranking.
+    The DECC is a broad venue, so the visual route should target the simple
+    Harbor Drive address rather than a venue centroid or a north-gate loading
+    description.
+    """
+    query = clean_text(row.get("visual_route_query"))
+    if query:
+        return query
+    return row_routing_query(row)
 
 
 def row_place_id(row: pd.Series) -> str:
@@ -326,10 +340,9 @@ def compute_route_polyline(
 ) -> RoutePolyline:
     """Compute a selected driving route polyline with Google Routes API.
 
-    The main app now draws selected routes in the browser with Google Maps
-    DirectionsRenderer. This helper is retained for scripts/tests and uses the
-    correct ComputeRoutes body shape: origin and destination are Waypoint objects
-    directly, not nested inside `waypoint`.
+    The main app uses this to get the selected route geometry. ComputeRoutes
+    expects origin and destination as Waypoint objects directly, not nested
+    inside `waypoint` like Compute Route Matrix.
     """
     api_key = clean_text(api_key)
     if not api_key:
@@ -471,10 +484,9 @@ def google_overview_map_html(
     - Geocoder fallback from `google_maps_query`
     - CSV coordinates as a final fallback
 
-    The selected route is drawn in the browser with Google Maps DirectionsRenderer.
-    The visual route intentionally prefers Google place IDs / address text over
-    stored coordinates, because Google Maps can snap raw venue coordinates to an
-    awkward nearby road segment. Route ranking can still use coordinate anchors.
+    The selected route is drawn from a server-side Routes API encoded polyline.
+    This avoids client-side DirectionsRenderer quirks around broad venues such as
+    the DECC while keeping all hotel and pickup markers on the same map.
     """
     marker_data = _marker_payload(pickups, kind="pickup")
     if show_hotels and hotels is not None:
@@ -608,17 +620,6 @@ function initBusFinderMap() {
   });
   const geocoder = new google.maps.Geocoder();
   const placesService = google.maps.places ? new google.maps.places.PlacesService(map) : null;
-  const directionsService = new google.maps.DirectionsService();
-  const directionsRenderer = new google.maps.DirectionsRenderer({
-    map: map,
-    suppressMarkers: true,
-    preserveViewport: false,
-    polylineOptions: {
-      strokeColor: "#6A1B9A",
-      strokeOpacity: 0.9,
-      strokeWeight: 6,
-    },
-  });
   const bounds = new google.maps.LatLngBounds();
   const infoWindow = new google.maps.InfoWindow();
   let added = 0;
@@ -711,37 +712,13 @@ function initBusFinderMap() {
   }
 
   function drawGoogleDirectionsRoute() {
-    const origin = waypointForDirections(routeOriginQuery, routeOriginPlaceId, routeOriginLat, routeOriginLng);
-    const destination = waypointForDirections(routeDestinationQuery, routeDestinationPlaceId, routeDestinationLat, routeDestinationLng);
-    if (!origin || !destination) {
-      return;
-    }
-    const waypoints = (Array.isArray(routeWaypoints) ? routeWaypoints : [])
-      .map(directionsWaypointFromPayload)
-      .filter(Boolean);
-    directionsService.route(
-      {
-        origin: origin,
-        destination: destination,
-        waypoints: waypoints,
-        optimizeWaypoints: false,
-        travelMode: google.maps.TravelMode.DRIVING,
-        provideRouteAlternatives: false,
-        region: "US",
-        unitSystem: google.maps.UnitSystem.IMPERIAL,
-      },
-      (result, status) => {
-        if (status === "OK" && result) {
-          directionsRenderer.setDirections(result);
-          routeDrawn = true;
-        } else {
-          routeFailed = true;
-          console.warn("Directions route could not be drawn", status);
-        }
-        document.getElementById("map-status").innerText = statusText();
-      }
-    );
+    // Intentionally disabled. Selected route geometry comes from the
+    // server-side Routes API encoded polyline. The legacy browser
+    // DirectionsRenderer can choose odd snaps for the broad DECC venue.
+    routeFailed = Boolean(routeOriginQuery && routeDestinationQuery && !routePolyline);
+    document.getElementById("map-status").innerText = statusText();
   }
+
 
   function mapsUrlFor(item, resolvedPlaceId) {
     const placeId = item.place_id || resolvedPlaceId || "";
@@ -861,7 +838,9 @@ function initBusFinderMap() {
     }
   }
 
-  drawGoogleDirectionsRoute();
+  if (!drawEncodedRoutePolyline()) {
+    drawGoogleDirectionsRoute();
+  }
 
   if (!markerData.length) {
     document.getElementById("map-status").innerText = "No map locations are configured.";
