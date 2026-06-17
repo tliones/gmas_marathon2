@@ -38,7 +38,7 @@ st.set_page_config(
 
 # Bump this when route-ranking inputs change so Streamlit Cloud does not reuse
 # old Google route matrix results from earlier app versions.
-ROUTE_CACHE_VERSION = "2026-06-17-live-controls-v9"
+ROUTE_CACHE_VERSION = "2026-06-17-py314-dataclass-fix-v10"
 TRAFFIC_AWARE_ROUTING = True
 
 
@@ -515,6 +515,134 @@ def render_compact_pickup_card(
             st.link_button("Official loading-site PDF", map_url, width="stretch")
 
 
+def unique_clean_values(values: pd.Series) -> list[str]:
+    """Return non-empty unique values while preserving order."""
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for value in values:
+        item = clean_text(value)
+        if item and item not in seen:
+            cleaned.append(item)
+            seen.add(item)
+    return cleaned
+
+
+def route_notes(route_df: pd.DataFrame) -> list[str]:
+    """Collect route-level notes and stop-level notes for display."""
+    notes: list[str] = []
+    notes.extend(unique_clean_values(route_df.get("route_note", pd.Series(dtype=str))))
+    notes.extend(unique_clean_values(route_df.get("notes", pd.Series(dtype=str))))
+    return notes
+
+
+def render_return_route_detail(route_df: pd.DataFrame) -> None:
+    """Clean, grouped view for one return-shuttle route."""
+    if route_df.empty:
+        st.info("No return-route details are available yet.")
+        return
+
+    route_name = clean_text(route_df.iloc[0].get("route_name"))
+    st.markdown(f"#### {route_name}")
+
+    stop_type = route_df["stop_type"].fillna("").astype(str).str.lower()
+    pickup_stops = unique_clean_values(
+        route_df.loc[stop_type == "pickup location", "stop_name"]
+    )
+    hotel_stops = unique_clean_values(
+        route_df.loc[stop_type == "hotel", "stop_name"]
+    )
+    other_stops = unique_clean_values(
+        route_df.loc[~stop_type.isin(["pickup location", "hotel"]), "stop_name"]
+    )
+
+    stop_cols = st.columns(2, gap="large")
+    with stop_cols[0]:
+        st.markdown("**Returns to pickup/loading location**")
+        if pickup_stops:
+            for stop in pickup_stops:
+                st.markdown(f"- {stop}")
+        else:
+            st.caption("No pickup-location stop listed.")
+
+    with stop_cols[1]:
+        st.markdown("**Hotel / lodging stops**")
+        if hotel_stops:
+            for stop in hotel_stops:
+                st.markdown(f"- {stop}")
+        else:
+            st.caption("No hotel stops listed for this route.")
+
+    if other_stops:
+        st.markdown("**Other stops**")
+        for stop in other_stops:
+            st.markdown(f"- {stop}")
+
+    notes = route_notes(route_df)
+    if notes:
+        for note in notes:
+            st.info(note, icon="ℹ️")
+
+
+def render_return_routes_overview(return_routes: pd.DataFrame) -> None:
+    """Small all-routes table that is readable instead of raw CSV output."""
+    if return_routes.empty:
+        return
+
+    rows: list[dict[str, str]] = []
+    for route_name, route_df in return_routes.groupby("route_name", sort=False):
+        stops = unique_clean_values(route_df["stop_name"])
+        notes = route_notes(route_df)
+        rows.append(
+            {
+                "Return route": clean_text(route_name),
+                "Stops": ", ".join(stops),
+                "Notes": " ".join(notes),
+            }
+        )
+
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Return route": st.column_config.TextColumn("Return route", width="medium"),
+            "Stops": st.column_config.TextColumn("Stops", width="large"),
+            "Notes": st.column_config.TextColumn("Notes", width="medium"),
+        },
+    )
+
+
+def render_transportation_tips(other_transportation: list[dict[str, Any]]) -> None:
+    """Render non-shuttle transportation notes as simple cards, not raw lists."""
+    if not other_transportation:
+        return
+
+    st.markdown("### Other race-weekend transportation")
+    tip_cols = st.columns(2, gap="large")
+    for idx, item in enumerate(other_transportation):
+        with tip_cols[idx % 2]:
+            with st.container(border=True):
+                title = clean_text(item.get("title"))
+                if title:
+                    st.markdown(f"**{title}**")
+
+                details = item.get("details") or []
+                if isinstance(details, str):
+                    details = [details]
+                for detail in details:
+                    detail = clean_text(detail)
+                    if detail:
+                        st.markdown(f"- {detail}")
+
+                schedule = item.get("schedule") or []
+                if isinstance(schedule, str):
+                    schedule = [schedule]
+                for schedule_item in schedule:
+                    schedule_item = clean_text(schedule_item)
+                    if schedule_item:
+                        st.markdown(f"- {schedule_item}")
+
+
 def main() -> None:
     inject_layout_css()
 
@@ -803,22 +931,48 @@ def main() -> None:
             )
 
     with return_tab:
-        st.subheader("Return shuttles + race-weekend transportation")
+        st.subheader("Return shuttles + race-weekend tips")
         st.markdown(
-            "**Return buses:** Free return shuttle service runs from the DECC on Railroad Street near the north gate "
-            "from 8:00 a.m. to 3:30 p.m. Two Harbors returns depart on the hour."
+            "Use this tab after the race to see where the free return shuttles go, plus a few race-weekend transportation notes."
         )
+
+        summary_cols = st.columns(3)
+        summary_cols[0].metric("Return buses run", "8:00 a.m.–3:30 p.m.")
+        summary_cols[1].metric("Depart from", "DECC north gate")
+        summary_cols[2].metric("Two Harbors", "Hourly returns")
+
+        st.info(
+            "Return shuttles depart from the DECC on Railroad Street near the north gate. "
+            "All routes except Two Harbors run continuously and depart when full.",
+            icon="🚌",
+        )
+
         if not return_routes.empty:
-            st.dataframe(return_routes, hide_index=True, width="stretch")
+            route_names = unique_clean_values(return_routes["route_name"])
+            lookup_col, detail_col = st.columns([0.30, 0.70], gap="large")
+
+            with lookup_col:
+                selected_return_route = st.selectbox(
+                    "Where are you returning?",
+                    route_names,
+                    key="selected_return_route",
+                    help="Choose a return-shuttle route to see its pickup-location and hotel stops.",
+                )
+
+                st.markdown("**Quick reminders**")
+                st.markdown("- Return buses are free for participants and spectators.")
+                st.markdown("- Two Harbors buses depart on the hour.")
+                st.markdown("- Racecourse-area stops may be served as near as possible while the event is ongoing.")
+
+            with detail_col:
+                selected_route_df = return_routes.loc[return_routes["route_name"] == selected_return_route]
+                render_return_route_detail(selected_route_df)
+
+            with st.expander("Show all return routes", expanded=False):
+                render_return_routes_overview(return_routes)
 
         st.markdown("---")
-        for item in other_transportation:
-            st.markdown(f"**{item.get('title', '')}**")
-            if item.get("details"):
-                st.write(item["details"])
-            if item.get("schedule"):
-                for schedule_item in item["schedule"]:
-                    st.write(f"- {schedule_item}")
+        render_transportation_tips(other_transportation)
 
         st.caption(
             "Race-day logistics can change. Verify final loading windows, road closures, and shuttle details with the official race guide before publishing."

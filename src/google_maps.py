@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import html
 import json
-from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import quote_plus, urlencode
 
@@ -21,15 +20,30 @@ ROUTES_MATRIX_ENDPOINT = "https://routes.googleapis.com/distanceMatrix/v2:comput
 ROUTES_COMPUTE_ENDPOINT = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
 
-@dataclass(frozen=True)
 class RouteResult:
-    """One origin-to-pickup route result from Google Routes API."""
+    """One origin-to-pickup route result from Google Routes API.
 
-    pickup_id: str
-    distance_meters: int | None
-    duration_seconds: int | None
-    condition: str
-    error: str = ""
+    This intentionally avoids ``@dataclass``. Streamlit Cloud hot-reloaded this
+    module under Python 3.14 in a way that triggered a dataclasses import-time
+    edge case, even before the app UI loaded. A small plain Python class is all
+    we need here and is more robust across Streamlit deploy environments.
+    """
+
+    __slots__ = ("pickup_id", "distance_meters", "duration_seconds", "condition", "error")
+
+    def __init__(
+        self,
+        pickup_id: str,
+        distance_meters: int | None,
+        duration_seconds: int | None,
+        condition: str,
+        error: str = "",
+    ) -> None:
+        self.pickup_id = pickup_id
+        self.distance_meters = distance_meters
+        self.duration_seconds = duration_seconds
+        self.condition = condition
+        self.error = error
 
     @property
     def distance_miles(self) -> float | None:
@@ -44,14 +58,22 @@ class RouteResult:
         return self.duration_seconds / 60
 
 
-@dataclass(frozen=True)
 class RoutePolyline:
     """A selected route line that can be drawn on the Google overview map."""
 
-    encoded_polyline: str
-    distance_meters: int | None = None
-    duration_seconds: int | None = None
-    error: str = ""
+    __slots__ = ("encoded_polyline", "distance_meters", "duration_seconds", "error")
+
+    def __init__(
+        self,
+        encoded_polyline: str,
+        distance_meters: int | None = None,
+        duration_seconds: int | None = None,
+        error: str = "",
+    ) -> None:
+        self.encoded_polyline = encoded_polyline
+        self.distance_meters = distance_meters
+        self.duration_seconds = duration_seconds
+        self.error = error
 
     @property
     def distance_miles(self) -> float | None:

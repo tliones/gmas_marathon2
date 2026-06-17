@@ -14,16 +14,16 @@ The app is centered around one main Google map: pickup and hotel pins are shown 
 - Shows the pickup selector and route details to the left of the map.
 - Keeps the main Plan route view compact so most users do not need to scroll.
 - Moves the full pickup-options table into a separate **Compare pickups** tab.
-- Keeps return shuttles and race-weekend transportation notes in their own tab.
+- Keeps return shuttles and race-weekend transportation notes in a cleaner lookup-style tab.
 - Keeps official loading-site PDF links next to each pickup.
 
 ## Latest changes
 
-This version keeps the cleaner tabbed design and makes the Plan route controls live-update immediately:
+This version keeps the cleaner tabbed design, keeps the Plan route controls live-updating, and cleans up the Return shuttles + tips tab so it no longer displays raw CSV/JSON-style output.
 
 1. **Plan route:** compact controls on the left, large Google map on the right, and the selected driving route drawn directly on the map. Hotel/custom start controls, race, corral, and hotel-pin visibility now update without a submit button.
 2. **Compare pickups:** the full pickup-options table, sorted by traffic-aware Google driving distance after a starting location is chosen. Race and corral changes update the table immediately.
-3. **Return shuttles + tips:** return-bus destinations, bike valet, DTA, trolley, skywalk, and Lakewalk notes.
+3. **Return shuttles + tips:** a return-route selector, grouped stop lists, a compact all-routes overview, and card-style bike valet / DTA / trolley / skywalk / Lakewalk notes.
 
 The main Plan route tab intentionally removes the table from below the map so the core workflow fits better on one screen. There is no separate “Find pickup options” button; once a valid hotel or custom location is present, the app recalculates automatically.
 
@@ -170,6 +170,8 @@ python scripts/resolve_google_place_ids.py --file data/hotels.csv --overwrite
 ## Streamlit version note
 
 This project requires **Streamlit 1.58 or newer** because it uses Streamlit's built-in `st.iframe()` API instead of the deprecated `st.components.v1.html()` / `st.components.v1.iframe()` helpers.
+
+This patch also avoids `@dataclass` in `src/google_maps.py`. Some Streamlit Cloud hot-reload builds using Python 3.14 raised an import-time dataclasses error before the app UI loaded. The small route-result containers are now plain Python classes, with no change to the route calculations or map behavior.
 
 ## Deployment notes
 
