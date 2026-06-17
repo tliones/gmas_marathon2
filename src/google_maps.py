@@ -459,6 +459,7 @@ def google_overview_map_html(
     route_destination_place_id: str = "",
     route_destination_latitude: Any = None,
     route_destination_longitude: Any = None,
+    route_waypoints: list[dict[str, Any]] | None = None,
     route_polyline: str = "",
     height: int = 620,
 ) -> str:
@@ -471,9 +472,9 @@ def google_overview_map_html(
     - CSV coordinates as a final fallback
 
     The selected route is drawn in the browser with Google Maps DirectionsRenderer.
-    When available, exact latitude/longitude route anchors are used before text
-    search strings. This keeps the purple route tied to the same points used for
-    driving-distance ranking and avoids odd detours caused by ambiguous venue names.
+    The visual route intentionally prefers Google place IDs / address text over
+    stored coordinates, because Google Maps can snap raw venue coordinates to an
+    awkward nearby road segment. Route ranking can still use coordinate anchors.
     """
     marker_data = _marker_payload(pickups, kind="pickup")
     if show_hotels and hotels is not None:
@@ -500,6 +501,20 @@ def google_overview_map_html(
             }
         )
 
+    sanitized_waypoints: list[dict[str, Any]] = []
+    for waypoint in route_waypoints or []:
+        lat = optional_float(waypoint.get("lat") or waypoint.get("latitude"))
+        lng = optional_float(waypoint.get("lng") or waypoint.get("longitude"))
+        sanitized_waypoints.append(
+            {
+                "query": clean_text(waypoint.get("query")),
+                "place_id": clean_text(waypoint.get("place_id")),
+                "lat": "" if lat is None else str(lat),
+                "lng": "" if lng is None else str(lng),
+                "stopover": bool(waypoint.get("stopover", False)),
+            }
+        )
+
     replacements = {
         "__HEIGHT__": html.escape(str(int(height)), quote=True),
         "__MARKER_JSON__": json.dumps(marker_data, ensure_ascii=False),
@@ -514,6 +529,7 @@ def google_overview_map_html(
         "__ROUTE_DESTINATION_PLACE_ID__": json.dumps(clean_text(route_destination_place_id), ensure_ascii=False),
         "__ROUTE_DESTINATION_LAT__": json.dumps("" if optional_float(route_destination_latitude) is None else str(optional_float(route_destination_latitude))),
         "__ROUTE_DESTINATION_LNG__": json.dumps("" if optional_float(route_destination_longitude) is None else str(optional_float(route_destination_longitude))),
+        "__ROUTE_WAYPOINTS__": json.dumps(sanitized_waypoints, ensure_ascii=False),
         "__API_KEY__": quote_plus(clean_text(api_key)),
     }
 
@@ -535,6 +551,7 @@ const routeDestinationQuery = __ROUTE_DESTINATION_QUERY__;
 const routeDestinationPlaceId = __ROUTE_DESTINATION_PLACE_ID__;
 const routeDestinationLat = __ROUTE_DESTINATION_LAT__;
 const routeDestinationLng = __ROUTE_DESTINATION_LNG__;
+const routeWaypoints = __ROUTE_WAYPOINTS__;
 
 function escapeHtml(value) {
   return String(value || "")
@@ -560,14 +577,24 @@ function latLngFromPair(latValue, lngValue) {
 }
 
 function waypointForDirections(query, placeId, latValue, lngValue) {
-  const point = latLngFromPair(latValue, lngValue);
-  if (point) {
-    return point;
-  }
+  // Prefer the same place/address text a user would type into Google Maps.
+  // Raw coordinates are only a fallback; for large venues, coordinates can snap
+  // to an odd nearby road segment and produce a strange visual route.
   if (placeId) {
     return { placeId: placeId };
   }
-  return query;
+  if (query) {
+    return query;
+  }
+  return latLngFromPair(latValue, lngValue);
+}
+
+function directionsWaypointFromPayload(item) {
+  const location = waypointForDirections(item.query || "", item.place_id || "", item.lat || "", item.lng || "");
+  if (!location) {
+    return null;
+  }
+  return { location: location, stopover: Boolean(item.stopover) };
 }
 
 function initBusFinderMap() {
@@ -689,13 +716,19 @@ function initBusFinderMap() {
     if (!origin || !destination) {
       return;
     }
+    const waypoints = (Array.isArray(routeWaypoints) ? routeWaypoints : [])
+      .map(directionsWaypointFromPayload)
+      .filter(Boolean);
     directionsService.route(
       {
         origin: origin,
         destination: destination,
+        waypoints: waypoints,
+        optimizeWaypoints: false,
         travelMode: google.maps.TravelMode.DRIVING,
         provideRouteAlternatives: false,
         region: "US",
+        unitSystem: google.maps.UnitSystem.IMPERIAL,
       },
       (result, status) => {
         if (status === "OK" && result) {
@@ -799,15 +832,8 @@ function initBusFinderMap() {
   }
 
   function resolveItem(item) {
-    // For the selected start/pickup, prefer configured route anchors so the
-    // visible marker and the purple route use the same endpoint. Other hotel
-    // markers still use Google place resolution first.
-    const configured = coordinateFallback(item);
-    const isRouteEndpoint = item.id === selectedPickupId || item.id === selectedOriginId || item.kind === "origin";
-    if (configured && isRouteEndpoint) {
-      finish(item, configured, "configured route anchor OK");
-      return;
-    }
+    // Prefer Google's place/address resolution for visible markers. CSV
+    // coordinates remain a final fallback when Google cannot resolve a marker.
     if (item.place_id) {
       geocodeItem(item, "place_id");
       return;
@@ -835,9 +861,7 @@ function initBusFinderMap() {
     }
   }
 
-  if (!drawEncodedRoutePolyline()) {
-    drawGoogleDirectionsRoute();
-  }
+  drawGoogleDirectionsRoute();
 
   if (!markerData.length) {
     document.getElementById("map-status").innerText = "No map locations are configured.";

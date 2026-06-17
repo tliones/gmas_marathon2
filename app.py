@@ -36,7 +36,7 @@ st.set_page_config(
 
 # Bump this when route-ranking inputs change so Streamlit Cloud does not reuse
 # old Google route matrix results from earlier app versions.
-ROUTE_CACHE_VERSION = "2026-06-17-route-anchor-drawing-v4"
+ROUTE_CACHE_VERSION = "2026-06-17-query-route-drawing-v5"
 
 
 @st.cache_data(show_spinner=False)
@@ -253,6 +253,37 @@ def apply_origin_guardrails(ranked: pd.DataFrame, search: dict[str, Any]) -> pd.
         return adjusted.drop(columns=["area_guardrail_sort"]).reset_index(drop=True)
 
     return ranked.reset_index(drop=True)
+
+
+def visual_route_waypoints(search: dict[str, Any] | None, selected_row: pd.Series | None) -> list[dict[str, Any]]:
+    """Return optional non-stopover waypoints for browser-side route drawing.
+
+    Google Maps JavaScript Directions can occasionally snap DECC's broad venue
+    address to an awkward approach road. For Canal Park / downtown starts going
+    to DECC, this lightweight via point nudges the visual route onto the short
+    Lake Avenue / Harbor Drive approach that users see in normal Google Maps.
+
+    These waypoints affect only the purple route drawn on the map; the ranking
+    table still uses Google Route Matrix distances.
+    """
+    if not search or selected_row is None:
+        return []
+    if clean_text(selected_row.get("id")) != "decc_bus":
+        return []
+
+    origin_text = " ".join(
+        clean_text(search.get(key))
+        for key in ["origin_area", "origin_label", "origin_query", "origin_address"]
+    ).lower()
+    if not any(term in origin_text for term in ["canal park", "downtown", "lake avenue", "waterfront", "pier b"]):
+        return []
+
+    return [
+        {
+            "query": "South Lake Avenue and Harbor Drive, Duluth, MN 55802",
+            "stopover": False,
+        }
+    ]
 
 
 def render_iframe(src: str, height: int = 620) -> None:
@@ -539,7 +570,7 @@ def main() -> None:
 
     with map_col:
         st.subheader("Map")
-        st.caption("Pickup and hotel markers are resolved by Google Maps. The selected driving route uses the same route anchors as the distance ranking.")
+        st.caption("Pickup and hotel markers are resolved by Google Maps. The purple route uses Google Maps directions; distance ranking still uses Google Route Matrix.")
         if api_key:
             route_origin_query = ""
             route_origin_place_id = ""
@@ -549,16 +580,18 @@ def main() -> None:
             route_destination_place_id = ""
             route_destination_latitude = ""
             route_destination_longitude = ""
+            route_waypoints: list[dict[str, Any]] = []
             if search and selected_row is not None:
                 route_origin_query = search.get("origin_map_query") or search.get("origin_query", "")
                 route_origin_place_id = search.get("origin_place_id", "")
                 route_origin_latitude = search.get("origin_latitude", "")
                 route_origin_longitude = search.get("origin_longitude", "")
                 dest_lat, dest_lng = row_lat_lng(selected_row)
-                route_destination_query = clean_text(selected_row.get("destination_query"))
+                route_destination_query = clean_text(selected_row.get("destination_map_query")) or clean_text(selected_row.get("destination_query"))
                 route_destination_place_id = clean_text(selected_row.get("destination_place_id"))
                 route_destination_latitude = dest_lat
                 route_destination_longitude = dest_lng
+                route_waypoints = visual_route_waypoints(search, selected_row)
 
             overview_html = google_overview_map_html(
                 api_key=api_key,
@@ -579,6 +612,7 @@ def main() -> None:
                 route_destination_place_id=route_destination_place_id,
                 route_destination_latitude=route_destination_latitude,
                 route_destination_longitude=route_destination_longitude,
+                route_waypoints=route_waypoints,
                 height=700,
             )
             render_iframe(overview_html, height=740)
@@ -590,7 +624,7 @@ def main() -> None:
     if not search:
         st.caption("Choose a starting location to sort this table by Google driving distance.")
     else:
-        st.caption("Sorted by Google driving distance when available. Pickup ranking uses stored coordinates for pickup destinations to avoid address-search ambiguity around DECC.")
+        st.caption("Sorted by Google driving distance when available. The table uses Google Route Matrix; the map route uses Google Maps directions for a more familiar route preview.")
     render_rank_table(ranked, show_distance=show_distance)
 
     with st.expander("Return shuttles and other transportation"):

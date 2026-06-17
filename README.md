@@ -24,11 +24,12 @@ This version keeps the simple three-part layout:
 2. **Main map:** all pickup/hotel markers plus the selected route line.
 3. **Bottom table:** all pickup options, sorted by Google driving distance when available.
 
-It also fixes three route issues:
+It also fixes the DECC visual-route issue:
 
 - **Route drawing no longer uses a server-side ComputeRoutes call.** The previous version sent an invalid ComputeRoutes body shape for route drawing, which could produce `400 Bad Request`. The main map now draws the selected route in the browser with Google Maps JavaScript `DirectionsRenderer`.
-- **Route drawing now prefers exact route anchors.** The purple route line uses latitude/longitude route anchors when they are available, instead of relying only on text queries. This reduces odd detours caused by Google resolving a large venue name to the middle of a complex.
-- **DECC is protected from bad address-search ranking.** Driving-distance ranking now sends pickup destination route anchors to Google Route Matrix instead of relying only on a text query. This keeps DECC from being missed or ranked behind Kirby for Canal Park / downtown hotels because of an ambiguous address or venue-name match.
+- **The visual route now prefers Google Maps place/address text over raw coordinates.** This better matches the route a user sees when opening the same trip in Google Maps. Coordinates are still kept for fallback markers and distance ranking.
+- **DECC gets a Canal Park / downtown visual-route nudge.** When the selected start is a Canal Park or downtown lodging spot and the selected pickup is DECC, the browser route includes a non-stopover via point at South Lake Avenue and Harbor Drive. This prevents the strange hillside loop that can happen when Google snaps DECC's broad venue location to an awkward road segment.
+- **DECC is protected from bad address-search ranking.** Driving-distance ranking still sends pickup destination route anchors to Google Route Matrix instead of relying only on a text query. This keeps DECC from being missed or ranked behind Kirby for Canal Park / downtown hotels because of an ambiguous address or venue-name match.
 
 For visible markers, the map still tries Google-resolved locations first:
 
@@ -97,13 +98,13 @@ GOOGLE_MAPS_API_KEY = "paste-your-google-maps-platform-key-here"
 
 ## Map and routing accuracy
 
-The app uses two separate ideas of location:
+The app uses three related but separate ideas of location:
 
-- **Visible marker location:** resolved in the browser by Google Maps using `google_place_id`, `google_maps_query`, or the geocoder. CSV coordinates are the fallback, and route anchors can be used for pickup markers when configured.
-- **Driving-distance ranking location:** sent to Google Route Matrix. For pickup destinations, the app now prefers `routing_latitude` / `routing_longitude`, then falls back to `latitude` / `longitude`, then text. For listed hotels, it also sends hotel coordinates when available to avoid brand/name ambiguity.
-- **Selected route line:** drawn in the browser using the same route anchors as the ranking table when those anchors exist.
+- **Visible marker location:** resolved in the browser by Google Maps using `google_place_id`, `google_maps_query`, or the geocoder. CSV coordinates are the final fallback.
+- **Driving-distance ranking location:** sent to Google Route Matrix. For pickup destinations, the app prefers `routing_latitude` / `routing_longitude`, then falls back to `latitude` / `longitude`, then text. For listed hotels, it also sends hotel coordinates when available to avoid brand/name ambiguity.
+- **Selected route line:** drawn in the browser with Google Maps directions, preferring Google place IDs or address text over raw coordinates so the route preview behaves more like opening the same trip in Google Maps.
 
-This means large venues can keep a readable search query while using a more practical driveway / vehicle-access point for route calculations.
+This means large venues can keep a readable search query for map display while using a practical vehicle-access point for distance calculations.
 
 ## Updating pickup spots
 
@@ -114,9 +115,9 @@ Important columns:
 - `id`: stable machine-readable ID.
 - `name`, `address`, `city`, `state`, `zip`: displayed to users.
 - `google_maps_query`: Google map marker/search query.
-- `routing_query`: Google routing query used for Google Maps URLs and browser route drawing.
+- `routing_query`: Google routing query used for Google Maps URLs and as a text fallback for browser route drawing.
 - `latitude`, `longitude`: general marker fallback coordinates.
-- `routing_latitude`, `routing_longitude`: preferred coordinates for driving-distance ranking and the selected purple route line. For large venues, these should be near a practical vehicle-access point rather than the geometric center of the complex.
+- `routing_latitude`, `routing_longitude`: preferred coordinates for driving-distance ranking. For large venues, these should be near a practical vehicle-access point rather than the geometric center of the complex.
 - `routing_anchor_note`: explains why a routing anchor was chosen.
 - `google_place_id`: optional exact Google place ID. Leave blank until verified.
 - `google_query_note`: note explaining why the query was chosen.
