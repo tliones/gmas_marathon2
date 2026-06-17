@@ -38,7 +38,7 @@ st.set_page_config(
 
 # Bump this when route-ranking inputs change so Streamlit Cloud does not reuse
 # old Google route matrix results from earlier app versions.
-ROUTE_CACHE_VERSION = "2026-06-17-clean-tabbed-layout-v8"
+ROUTE_CACHE_VERSION = "2026-06-17-live-controls-v9"
 TRAFFIC_AWARE_ROUTING = True
 
 
@@ -552,65 +552,90 @@ def main() -> None:
 
         with control_col:
             st.markdown("### Plan")
-            with st.form("route_settings_form"):
-                st.markdown("**1. Start**")
-                start_type = st.radio(
-                    "Starting location",
-                    ["Hotel/lodging", "Custom"],
-                    horizontal=True,
+            st.markdown("**1. Start**")
+            start_type = st.radio(
+                "Starting location",
+                ["Hotel/lodging", "Custom"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="start_type",
+            )
+
+            selected_hotel_label = ""
+            custom_origin = ""
+            if start_type == "Hotel/lodging":
+                hotel_labels = ["Select a hotel..."] + hotels["display_name"].tolist()
+                selected_hotel_label = st.selectbox(
+                    "Hotel or lodging",
+                    hotel_labels,
                     label_visibility="collapsed",
+                    key="selected_hotel_label",
                 )
-                selected_hotel_label = ""
-                custom_origin = ""
-                if start_type == "Hotel/lodging":
-                    hotel_labels = ["Select a hotel..."] + hotels["display_name"].tolist()
-                    selected_hotel_label = st.selectbox(
-                        "Hotel or lodging",
-                        hotel_labels,
-                        label_visibility="collapsed",
-                    )
-                else:
-                    custom_origin = st.text_input(
-                        "Address, hotel, landmark, or neighborhood",
-                        placeholder="Example: Canal Park Lodge, Duluth MN",
-                        label_visibility="collapsed",
-                    )
-
-                st.markdown("**2. Race**")
-                race_cols = st.columns(2)
-                with race_cols[0]:
-                    race_name = st.selectbox("Race", list(RACE_CONFIG.keys()))
-                race_key = str(RACE_CONFIG[race_name]["key"])
-                with race_cols[1]:
-                    corral = st.selectbox("Corral", RACE_CONFIG[race_name]["corrals"])
-
-                show_hotels = st.checkbox(
-                    "Show hotel pins",
-                    value=bool(search.get("show_hotels", True)) if search else True,
+            else:
+                custom_origin = st.text_input(
+                    "Address, hotel, landmark, or neighborhood",
+                    placeholder="Example: Canal Park Lodge, Duluth MN",
+                    label_visibility="collapsed",
+                    key="custom_origin",
                 )
-                submitted = st.form_submit_button("Find pickup options", type="primary", width="stretch")
 
-            if submitted:
-                origin = origin_from_form(
-                    start_type="Choose a listed hotel/lodging" if start_type == "Hotel/lodging" else "Enter a custom address or place",
-                    selected_hotel_label=selected_hotel_label,
-                    custom_origin=custom_origin,
-                    hotels=hotels,
+            st.markdown("**2. Race**")
+            race_cols = st.columns(2)
+            race_options = list(RACE_CONFIG.keys())
+            with race_cols[0]:
+                race_name = st.selectbox("Race", race_options, key="race_name")
+            race_key = str(RACE_CONFIG[race_name]["key"])
+            corral_options = list(RACE_CONFIG[race_name]["corrals"])
+
+            # Streamlit preserves widget state across reruns. If the user changes
+            # from the half marathon to the full marathon, replace the old numeric
+            # corral with the first valid full-marathon corral before rendering the
+            # corral selectbox. This makes the A/B/C options appear immediately.
+            if st.session_state.get("corral") not in corral_options:
+                st.session_state["corral"] = corral_options[0]
+            with race_cols[1]:
+                corral = st.selectbox("Corral", corral_options, key="corral")
+
+            show_hotels = st.checkbox(
+                "Show hotel pins",
+                value=True,
+                key="show_hotels",
+            )
+
+            origin = origin_from_form(
+                start_type="Choose a listed hotel/lodging" if start_type == "Hotel/lodging" else "Enter a custom address or place",
+                selected_hotel_label=selected_hotel_label,
+                custom_origin=custom_origin,
+                hotels=hotels,
+            )
+
+            if origin["origin_query"]:
+                search_signature = (
+                    origin.get("origin_query", ""),
+                    origin.get("origin_place_id", ""),
+                    origin.get("origin_label", ""),
+                    race_key,
                 )
-                if not origin["origin_query"]:
-                    st.warning("Choose a hotel or enter a starting address first.")
-                else:
+                if st.session_state.get("search_signature") != search_signature:
                     st.session_state.pop("pickup_selector_id", None)
                     st.session_state.pop("pickup_selector", None)
-                    st.session_state["last_search"] = {
-                        **origin,
-                        "race_name": race_name,
-                        "race_key": race_key,
-                        "corral": corral,
-                        "show_hotels": show_hotels,
-                        "traffic_aware": TRAFFIC_AWARE_ROUTING,
-                    }
-                    search = st.session_state.get("last_search")
+                    st.session_state["search_signature"] = search_signature
+
+                st.session_state["last_search"] = {
+                    **origin,
+                    "race_name": race_name,
+                    "race_key": race_key,
+                    "corral": corral,
+                    "show_hotels": show_hotels,
+                    "traffic_aware": TRAFFIC_AWARE_ROUTING,
+                }
+                search = st.session_state.get("last_search")
+            else:
+                st.session_state.pop("last_search", None)
+                st.session_state.pop("search_signature", None)
+                st.session_state.pop("pickup_selector_id", None)
+                st.session_state.pop("pickup_selector", None)
+                search = None
 
         display_race_name = search["race_name"] if search else race_name
         display_race_key = search["race_key"] if search else race_key
@@ -644,7 +669,7 @@ def main() -> None:
 
         with control_col:
             if not search:
-                st.info("Choose a starting point, then click **Find pickup options**. The map already shows pickup and hotel pins.")
+                st.info("Choose a hotel or enter a custom starting point. Pickup options and the map update automatically.")
             elif not ranked.empty:
                 st.markdown("### Pickup")
                 start_line = f"**From:** {search['origin_label']}"

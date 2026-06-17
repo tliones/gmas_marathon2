@@ -19,13 +19,13 @@ The app is centered around one main Google map: pickup and hotel pins are shown 
 
 ## Latest changes
 
-This version changes the layout to a cleaner tabbed design:
+This version keeps the cleaner tabbed design and makes the Plan route controls live-update immediately:
 
-1. **Plan route:** compact controls on the left, large Google map on the right, and the selected driving route drawn directly on the map.
-2. **Compare pickups:** the full pickup-options table, sorted by traffic-aware Google driving distance after a starting location is chosen.
+1. **Plan route:** compact controls on the left, large Google map on the right, and the selected driving route drawn directly on the map. Hotel/custom start controls, race, corral, and hotel-pin visibility now update without a submit button.
+2. **Compare pickups:** the full pickup-options table, sorted by traffic-aware Google driving distance after a starting location is chosen. Race and corral changes update the table immediately.
 3. **Return shuttles + tips:** return-bus destinations, bike valet, DTA, trolley, skywalk, and Lakewalk notes.
 
-The main Plan route tab intentionally removes the table from below the map so the core workflow fits better on one screen.
+The main Plan route tab intentionally removes the table from below the map so the core workflow fits better on one screen. There is no separate “Find pickup options” button; once a valid hotel or custom location is present, the app recalculates automatically.
 
 Traffic-aware routing is always on. The app uses `TRAFFIC_AWARE_OPTIMAL` for Google Routes API calls so the chosen route more closely matches what users see in Google Maps.
 
@@ -177,7 +177,7 @@ This project requires **Streamlit 1.58 or newer** because it uses Streamlit's bu
 - On Streamlit Community Cloud, store `GOOGLE_MAPS_API_KEY` in Secrets.
 - Apply API key restrictions in Google Cloud, such as HTTP referrer restrictions for browser APIs and API restrictions to the specific Google Maps APIs used here.
 - Review Google Maps Platform billing/quotas before public launch.
-- If you still see old distance rankings after deploying, restart the Streamlit app or clear cached data. This version includes a cache-version bump to avoid reusing earlier DECC route results and earlier traffic-unaware route results.
+- If you still see old distance rankings after deploying, restart the Streamlit app or clear cached data. This version includes a cache-version bump to avoid reusing earlier DECC route results, earlier traffic-unaware route results, or old live-control state.
 
 ## Important race-day disclaimer
 
