@@ -18,10 +18,11 @@ from src.data import (
 from src.google_maps import (
     clean_text,
     compute_driving_matrix,
-    compute_route_polyline,
     google_maps_directions_url,
     google_maps_search_url,
     google_overview_map_html,
+    optional_float,
+    row_lat_lng,
     row_location_query,
     row_place_id,
     row_routing_query,
@@ -32,6 +33,10 @@ st.set_page_config(
     page_icon="🚌",
     layout="wide",
 )
+
+# Bump this when route-ranking inputs change so Streamlit Cloud does not reuse
+# old Google route matrix results from earlier app versions.
+ROUTE_CACHE_VERSION = "2026-06-17-coordinate-routing-decc-fix-v3"
 
 
 @st.cache_data(show_spinner=False)
@@ -57,17 +62,32 @@ def cached_other_transportation() -> list[dict[str, Any]]:
 @st.cache_data(ttl=60 * 60, show_spinner="Checking Google driving distances...")
 def cached_route_matrix(
     api_key: str,
+    cache_version: str,
     origin_query: str,
-    destinations_tuple: tuple[tuple[str, str, str], ...],
+    origin_place_id: str,
+    origin_latitude: str,
+    origin_longitude: str,
+    destinations_tuple: tuple[tuple[str, str, str, str, str], ...],
     traffic_aware: bool,
 ) -> list[dict[str, Any]]:
+    """Cached wrapper around the Google Routes API route matrix call."""
+    _ = cache_version  # Included only to invalidate stale route caches after patches.
     destinations = [
-        {"id": item[0], "query": item[1], "place_id": item[2]}
+        {
+            "id": item[0],
+            "query": item[1],
+            "place_id": item[2],
+            "latitude": item[3],
+            "longitude": item[4],
+        }
         for item in destinations_tuple
     ]
     results = compute_driving_matrix(
         api_key=api_key,
         origin_query=origin_query,
+        origin_place_id=origin_place_id,
+        origin_latitude=origin_latitude,
+        origin_longitude=origin_longitude,
         destinations=destinations,
         traffic_aware=traffic_aware,
     )
@@ -83,29 +103,6 @@ def cached_route_matrix(
     ]
 
 
-@st.cache_data(ttl=60 * 60, show_spinner="Drawing selected Google route...")
-def cached_selected_route_polyline(
-    api_key: str,
-    origin_query: str,
-    destination_query: str,
-    destination_place_id: str,
-    traffic_aware: bool,
-) -> dict[str, Any]:
-    route = compute_route_polyline(
-        api_key=api_key,
-        origin_query=origin_query,
-        destination_query=destination_query,
-        destination_place_id=destination_place_id,
-        traffic_aware=traffic_aware,
-    )
-    return {
-        "encoded_polyline": route.encoded_polyline,
-        "distance_miles": route.distance_miles,
-        "duration_minutes": route.duration_minutes,
-        "error": route.error,
-    }
-
-
 def get_google_maps_api_key() -> str:
     """Read the Google Maps Platform key from Streamlit secrets or the environment."""
     try:
@@ -115,29 +112,33 @@ def get_google_maps_api_key() -> str:
     return clean_text(key)
 
 
-def card_container():
-    """Return a bordered container when available, with a plain-container fallback."""
-    try:
-        return st.container(border=True)
-    except TypeError:
-        return st.container()
-
-
 def arrival_window(row: pd.Series, race_key: str, corral: str) -> str:
     col = pickup_time_column(race_key, corral)
     return clean_text(row.get(col))
 
 
-def destination_tuple(pickups: pd.DataFrame) -> tuple[tuple[str, str, str], ...]:
-    """Routes API destinations: stable pickup ID, routing query, optional place ID."""
-    return tuple(
-        (
-            clean_text(row.get("id")),
-            row_routing_query(row),
-            row_place_id(row),
+def stringify_coord(value: Any) -> str:
+    coord = optional_float(value)
+    if coord is None:
+        return ""
+    return f"{coord:.8f}"
+
+
+def destination_tuple(pickups: pd.DataFrame) -> tuple[tuple[str, str, str, str, str], ...]:
+    """Routes API destinations: pickup ID, routing query, place ID, latitude, longitude."""
+    destinations: list[tuple[str, str, str, str, str]] = []
+    for _, row in pickups.iterrows():
+        lat, lng = row_lat_lng(row)
+        destinations.append(
+            (
+                clean_text(row.get("id")),
+                row_routing_query(row),
+                row_place_id(row),
+                stringify_coord(lat),
+                stringify_coord(lng),
+            )
         )
-        for _, row in pickups.iterrows()
-    )
+    return tuple(destinations)
 
 
 def format_miles(value: Any) -> str:
@@ -165,19 +166,23 @@ def make_ranked_pickups(
     pickups: pd.DataFrame,
     race_key: str,
     corral: str,
-    origin_query: str,
+    search: dict[str, Any],
     api_key: str,
-    traffic_aware: bool,
 ) -> pd.DataFrame:
     routes = cached_route_matrix(
         api_key,
-        origin_query,
+        ROUTE_CACHE_VERSION,
+        search["origin_query"],
+        search.get("origin_place_id", ""),
+        stringify_coord(search.get("origin_latitude")),
+        stringify_coord(search.get("origin_longitude")),
         destination_tuple(pickups),
-        traffic_aware,
+        bool(search.get("traffic_aware", False)),
     )
     route_df = pd.DataFrame(routes)
     ranked = pickups.merge(route_df, on="id", how="left")
-    return enrich_pickups_for_display(ranked, race_key, corral, origin_query, sort_by_route=True)
+    ranked = enrich_pickups_for_display(ranked, race_key, corral, search["origin_query"], sort_by_route=True)
+    return apply_origin_guardrails(ranked, search)
 
 
 def make_unranked_pickups(
@@ -220,6 +225,36 @@ def enrich_pickups_for_display(
     return display.reset_index(drop=True)
 
 
+def apply_origin_guardrails(ranked: pd.DataFrame, search: dict[str, Any]) -> pd.DataFrame:
+    """Keep DECC from being penalized by an obviously bad Google result for Canal Park.
+
+    Google route ranking now uses coordinates for the pickup destinations, so this
+    should rarely trigger. It is here because earlier address-only searches could
+    return a blank or implausibly long DECC result even though DECC is the closest
+    pickup for Canal Park / downtown hotels.
+    """
+    preferred = clean_text(search.get("preferred_pickup_id"))
+    if preferred != "decc_bus" or ranked.empty or "id" not in ranked.columns:
+        return ranked
+
+    ids = ranked["id"].tolist()
+    if "decc_bus" not in ids or "kirby_student_center" not in ids:
+        return ranked
+
+    decc_idx = ranked.index[ranked["id"] == "decc_bus"][0]
+    kirby_idx = ranked.index[ranked["id"] == "kirby_student_center"][0]
+    decc_miles = pd.to_numeric(ranked.loc[decc_idx, "driving_miles"], errors="coerce")
+    kirby_miles = pd.to_numeric(ranked.loc[kirby_idx, "driving_miles"], errors="coerce")
+
+    if pd.isna(decc_miles) or (not pd.isna(kirby_miles) and decc_miles > kirby_miles):
+        adjusted = ranked.copy()
+        adjusted["area_guardrail_sort"] = adjusted["id"].apply(lambda value: -1 if value == "decc_bus" else 0)
+        adjusted = adjusted.sort_values(["area_guardrail_sort", "route_sort"], na_position="last")
+        return adjusted.drop(columns=["area_guardrail_sort"]).reset_index(drop=True)
+
+    return ranked.reset_index(drop=True)
+
+
 def render_iframe(src: str, height: int = 620) -> None:
     """Render URL or HTML content in Streamlit's built-in iframe element."""
     st.iframe(src, height=height, width="stretch")
@@ -227,33 +262,39 @@ def render_iframe(src: str, height: int = 620) -> None:
 
 def render_rank_table(ranked: pd.DataFrame, *, show_distance: bool) -> None:
     display = ranked.copy()
-    display["Google directions"] = display["directions_url"]
-    display["Official loading map"] = display["loading_site_map_url"]
-    if show_distance:
-        display["Driving distance"] = display.get("driving_miles", pd.Series(dtype=float)).apply(format_miles)
-        display["Estimated drive"] = display.get("drive_minutes", pd.Series(dtype=float)).apply(format_minutes)
-    else:
-        display["Driving distance"] = "Not calculated"
-        display["Estimated drive"] = "Not calculated"
-    display["Recommended loading window"] = display["recommended_window"]
     display["Pickup"] = display["name"]
+    display["Driving distance"] = (
+        display.get("driving_miles", pd.Series(dtype=float)).apply(format_miles)
+        if show_distance
+        else "Not calculated"
+    )
+    display["Estimated drive"] = (
+        display.get("drive_minutes", pd.Series(dtype=float)).apply(format_minutes)
+        if show_distance
+        else "Not calculated"
+    )
+    display["Loading window"] = display["recommended_window"]
     display["Good for"] = display["best_for"]
-    columns = [
-        "Pickup",
-        "Driving distance",
-        "Estimated drive",
-        "Recommended loading window",
-        "Good for",
-        "Google directions",
-        "Official loading map",
-    ]
+    display["Directions"] = display["directions_url"]
+    display["Official map"] = display["loading_site_map_url"]
+
     st.dataframe(
-        display[columns],
+        display[
+            [
+                "Pickup",
+                "Driving distance",
+                "Estimated drive",
+                "Loading window",
+                "Good for",
+                "Directions",
+                "Official map",
+            ]
+        ],
         hide_index=True,
         width="stretch",
         column_config={
-            "Google directions": st.column_config.LinkColumn("Google directions", display_text="Open route"),
-            "Official loading map": st.column_config.LinkColumn("Official loading map", display_text="Official map"),
+            "Directions": st.column_config.LinkColumn("Directions", display_text="Open route"),
+            "Official map": st.column_config.LinkColumn("Official map", display_text="Official map"),
         },
     )
 
@@ -264,19 +305,25 @@ def origin_from_form(
     selected_hotel_label: str,
     custom_origin: str,
     hotels: pd.DataFrame,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Return normalized origin information from the controls."""
     if start_type == "Choose a listed hotel/lodging" and selected_hotel_label != "Select a hotel...":
         hotel_row = hotels.loc[hotels["display_name"] == selected_hotel_label].iloc[0]
+        lat, lng = row_lat_lng(hotel_row)
+        area = clean_text(hotel_row.get("area"))
+        preferred_pickup_id = "decc_bus" if ("canal park" in area.lower() or "downtown" in area.lower()) else ""
         return {
             "origin_query": row_routing_query(hotel_row),
             "origin_map_query": row_location_query(hotel_row),
             "origin_place_id": row_place_id(hotel_row),
+            "origin_latitude": lat,
+            "origin_longitude": lng,
             "origin_label": clean_text(hotel_row.get("name")),
             "origin_id": clean_text(hotel_row.get("id")),
             "origin_address": clean_text(hotel_row.get("full_address")),
-            "origin_area": clean_text(hotel_row.get("area")),
+            "origin_area": area,
             "origin_kind": "hotel",
+            "preferred_pickup_id": preferred_pickup_id,
         }
 
     custom_origin = clean_text(custom_origin)
@@ -285,85 +332,64 @@ def origin_from_form(
             "origin_query": custom_origin,
             "origin_map_query": custom_origin,
             "origin_place_id": "",
+            "origin_latitude": "",
+            "origin_longitude": "",
             "origin_label": custom_origin,
             "origin_id": "",
             "origin_address": custom_origin,
             "origin_area": "Custom address or place",
             "origin_kind": "custom",
+            "preferred_pickup_id": "",
         }
 
     return {
         "origin_query": "",
         "origin_map_query": "",
         "origin_place_id": "",
+        "origin_latitude": "",
+        "origin_longitude": "",
         "origin_label": "",
         "origin_id": "",
         "origin_address": "",
         "origin_area": "",
         "origin_kind": "",
+        "preferred_pickup_id": "",
     }
-
-
-def selected_route_polyline(
-    *,
-    api_key: str,
-    search: dict[str, Any] | None,
-    selected_row: pd.Series | None,
-) -> tuple[str, str]:
-    """Return selected route polyline and warning message, if any."""
-    if not api_key or not search or selected_row is None:
-        return "", ""
-    try:
-        route = cached_selected_route_polyline(
-            api_key,
-            search["origin_query"],
-            clean_text(selected_row.get("destination_query")),
-            clean_text(selected_row.get("destination_place_id")),
-            bool(search.get("traffic_aware")),
-        )
-        if clean_text(route.get("error")):
-            return "", clean_text(route.get("error"))
-        return clean_text(route.get("encoded_polyline")), ""
-    except Exception as exc:
-        return "", f"Google route drawing failed: {exc}"
 
 
 def render_selected_pickup_summary(
     row: pd.Series,
     *,
-    search: dict[str, Any],
     race_name: str,
     corral: str,
     show_distance: bool,
 ) -> None:
-    st.markdown("#### Pickup location")
+    st.markdown("#### Pickup")
     st.write(f"**{row['name']}**")
     if show_distance:
         metric_cols = st.columns(2)
         metric_cols[0].metric("Drive", format_miles(row.get("driving_miles")))
         metric_cols[1].metric("Time", format_minutes(row.get("drive_minutes")))
-    st.write(f"**Loading window:** {clean_text(row.get('recommended_window')) or 'Check official guide'}")
+    st.write(f"**Window:** {clean_text(row.get('recommended_window')) or 'Check official guide'}")
     st.caption(f"{race_name} · Corral {corral}")
-    st.write(f"**Address:** {row['full_address']}")
-    st.write(f"**Loading:** {row['loading_instructions']}")
+    st.write(row["full_address"])
 
-    map_url = clean_text(row.get("loading_site_map_url"))
-    button_cols = st.columns(2 if not map_url else 3)
+    button_cols = st.columns(2)
     with button_cols[0]:
         st.link_button("Directions", row["directions_url"], width="stretch")
     with button_cols[1]:
         st.link_button("Pickup map", row["open_in_maps_url"], width="stretch")
-    if map_url:
-        with button_cols[2]:
-            st.link_button("Official map", map_url, width="stretch")
 
-    with st.expander("More pickup notes"):
+    map_url = clean_text(row.get("loading_site_map_url"))
+    if map_url:
+        st.link_button("Official loading-site PDF", map_url, width="stretch")
+
+    with st.expander("Pickup notes"):
+        st.write(f"**Loading:** {row['loading_instructions']}")
         st.write(f"**Parking:** {row['parking_info']}")
         st.write(f"**Best for:** {row['best_for']}")
         if clean_text(row.get("access_notes")):
             st.info(clean_text(row.get("access_notes")))
-        if clean_text(row.get("google_query_note")):
-            st.caption(clean_text(row.get("google_query_note")))
 
 
 def main() -> None:
@@ -374,19 +400,19 @@ def main() -> None:
     api_key = get_google_maps_api_key()
 
     st.title("Duluth Race Shuttle Finder")
-    st.caption("Choose where you are staying, pick a race/corral, and compare Google driving routes to the race-morning bus pickups.")
+    st.caption("Pick where you are staying, choose a pickup, and see the Google driving route on the map.")
 
     if not api_key:
         st.warning(
-            "Add `GOOGLE_MAPS_API_KEY` in Streamlit secrets to enable the main Google map, route line, and driving-distance ranking. "
+            "Add `GOOGLE_MAPS_API_KEY` in Streamlit secrets to enable the Google map and driving-distance ranking. "
             "Without a key, this app still creates Google Maps direction links.",
             icon="🔑",
         )
 
-    control_col, map_col = st.columns([0.34, 0.66], gap="large")
+    control_col, map_col = st.columns([0.30, 0.70], gap="large")
 
     with control_col:
-        st.subheader("Choose route")
+        st.subheader("Route options")
         with st.form("route_settings_form"):
             start_type = st.radio(
                 "Starting location",
@@ -425,7 +451,7 @@ def main() -> None:
             if not origin["origin_query"]:
                 st.warning("Choose a hotel or enter a starting address first.")
             else:
-                st.session_state.pop("selected_pickup_name", None)
+                st.session_state.pop("pickup_selector", None)
                 st.session_state["last_search"] = {
                     **origin,
                     "race_name": race_name,
@@ -457,9 +483,8 @@ def main() -> None:
                 race_pickups,
                 display_race_key,
                 display_corral,
-                search["origin_query"],
+                search,
                 api_key,
-                bool(search["traffic_aware"]),
             )
             show_distance = True
         except Exception as exc:
@@ -474,14 +499,12 @@ def main() -> None:
 
     with control_col:
         if not search:
-            st.info("Pick a starting location and click **Update map**. The map will show all hotels and pickup spots until a route is selected.")
+            st.info("Choose a starting location and click **Update map**. The map will show the pickup spots and hotel pins.")
         elif not ranked.empty:
-            st.markdown("#### Starting location")
+            st.markdown("#### Start")
             st.write(f"**{search['origin_label']}**")
             if clean_text(search.get("origin_area")):
                 st.caption(clean_text(search.get("origin_area")))
-            if clean_text(search.get("origin_address")):
-                st.write(clean_text(search.get("origin_address")))
             st.link_button(
                 "Open start in Google Maps",
                 google_maps_search_url(search.get("origin_map_query") or search["origin_query"], search.get("origin_place_id", "")),
@@ -501,7 +524,7 @@ def main() -> None:
                 "Pickup location",
                 ranked["name"].tolist(),
                 index=0,
-                key="selected_pickup_name",
+                key="pickup_selector",
                 help="Changing this redraws the route on the main map.",
             )
             selected_row = ranked.loc[ranked["name"] == selected_name].iloc[0]
@@ -509,27 +532,25 @@ def main() -> None:
 
             render_selected_pickup_summary(
                 selected_row,
-                search=search,
                 race_name=display_race_name,
                 corral=display_corral,
                 show_distance=show_distance,
             )
 
-            st.info(f"Bag note: {RACE_CONFIG[display_race_name]['bag_note']}")
-
-    route_polyline, route_warning = selected_route_polyline(
-        api_key=api_key,
-        search=search,
-        selected_row=selected_row,
-    )
-
     with map_col:
         st.subheader("Map")
-        st.caption(
-            "Hotels and pickup spots are resolved by Google Maps from place names/addresses. "
-            "When a pickup is selected, the purple line shows the Google driving route."
-        )
+        st.caption("Pickup and hotel markers are resolved by Google Maps. Selecting a pickup draws the driving route in purple.")
         if api_key:
+            route_origin_query = ""
+            route_origin_place_id = ""
+            route_destination_query = ""
+            route_destination_place_id = ""
+            if search and selected_row is not None:
+                route_origin_query = search.get("origin_map_query") or search.get("origin_query", "")
+                route_origin_place_id = search.get("origin_place_id", "")
+                route_destination_query = clean_text(selected_row.get("destination_query"))
+                route_destination_place_id = clean_text(selected_row.get("destination_place_id"))
+
             overview_html = google_overview_map_html(
                 api_key=api_key,
                 pickups=race_pickups,
@@ -539,21 +560,22 @@ def main() -> None:
                 selected_origin_id=search["origin_id"] if search else "",
                 origin_query=search.get("origin_map_query") or search.get("origin_query") if search else "",
                 origin_label=search["origin_label"] if search else "",
-                route_polyline=route_polyline,
-                height=690,
+                route_origin_query=route_origin_query,
+                route_origin_place_id=route_origin_place_id,
+                route_destination_query=route_destination_query,
+                route_destination_place_id=route_destination_place_id,
+                height=700,
             )
-            render_iframe(overview_html, height=730)
-            if route_warning:
-                st.warning(route_warning)
+            render_iframe(overview_html, height=740)
         else:
             st.info("The Google map appears after `GOOGLE_MAPS_API_KEY` is configured in Streamlit Secrets.")
 
     st.divider()
     st.subheader("All pickup options")
     if not search:
-        st.caption("Timing overview. Choose a starting location to sort by Google driving distance.")
+        st.caption("Choose a starting location to sort this table by Google driving distance.")
     else:
-        st.caption("Sorted by Google driving distance when the API key is configured. DECC uses the stable official venue address for route ranking, with the official PDF showing the exact North Gate/Railroad Street loading area.")
+        st.caption("Sorted by Google driving distance when available. Pickup ranking uses stored coordinates for pickup destinations to avoid address-search ambiguity around DECC.")
     render_rank_table(ranked, show_distance=show_distance)
 
     with st.expander("Return shuttles and other transportation"):

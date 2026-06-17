@@ -18,19 +18,23 @@ The app is centered around one main Google map: pickup and hotel pins are shown 
 
 ## Latest changes
 
-This version simplifies the page into:
+This version keeps the simple three-part layout:
 
 1. **Left panel:** starting location, race/corral, hotel-pin toggle, pickup selector, and selected-pickup notes.
 2. **Main map:** all pickup/hotel markers plus the selected route line.
 3. **Bottom table:** all pickup options, sorted by Google driving distance when available.
 
-It also fixes the DECC ranking issue by adding a separate `routing_query` field. The DECC map/routing query now uses the stable official venue address:
+It also fixes two route issues:
 
-```text
-Duluth Entertainment Convention Center, 350 Harbor Drive, Duluth, MN 55802
-```
+- **Route drawing no longer uses a server-side ComputeRoutes call.** The previous version sent an invalid ComputeRoutes body shape for route drawing, which could produce `400 Bad Request`. The main map now draws the selected route in the browser with Google Maps JavaScript `DirectionsRenderer`.
+- **DECC is protected from bad address-search ranking.** Driving-distance ranking now sends pickup destination coordinates to Google Route Matrix instead of relying only on a text query. This keeps DECC from being missed or ranked behind Kirby for Canal Park / downtown hotels because of an ambiguous address or venue-name match.
 
-The app still displays the race-morning note that buses load at the North Gate along Railroad Street, and the official loading-site PDF remains linked for exact loading-zone details. The earlier `North Gate Railroad Street` text query was too fragile for Google route ranking and could cause DECC to be missing or pushed below farther locations.
+For visible markers, the map still tries Google-resolved locations first:
+
+1. `google_place_id`, when available
+2. Google Places text search using `google_maps_query`
+3. Google Geocoder fallback
+4. CSV latitude/longitude as a final fallback
 
 ## Project structure
 
@@ -66,8 +70,8 @@ Without a Google Maps Platform key, the app still opens Google Maps direction li
 
 Create a Google Maps Platform API key and enable these APIs for the project:
 
-- **Routes API** — used for driving-distance ranking and the selected route polyline.
-- **Maps JavaScript API** — used for the main all-location map.
+- **Routes API** — used for Route Matrix driving-distance ranking.
+- **Maps JavaScript API** — used for the main all-location map and browser-side route drawing.
 - **Places API / Places Library** — used by the map to resolve hotel and venue names to Google place locations when a place ID is not stored.
 
 For local development, copy the example secrets file and add your real key:
@@ -90,17 +94,14 @@ For Streamlit Community Cloud, add the same key in the app's Secrets settings:
 GOOGLE_MAPS_API_KEY = "paste-your-google-maps-platform-key-here"
 ```
 
-## Why this version is better for map accuracy
+## Map and routing accuracy
 
-The earlier Folium version used latitude/longitude columns for visible pins. That was fragile because hotel pins and large venues can land slightly away from the driveway, entrance, or loading side that Google Maps would actually use.
+The app uses two separate ideas of location:
 
-This version uses Google-facing fields instead:
+- **Visible marker location:** resolved in the browser by Google Maps using `google_place_id`, `google_maps_query`, or the geocoder. CSV coordinates are only the final marker fallback.
+- **Driving-distance ranking location:** sent to Google Route Matrix. For pickup destinations, the app now prefers the CSV latitude/longitude so large venues like DECC do not disappear or rank incorrectly because of an ambiguous text search. For listed hotels, the app also sends hotel coordinates when available to avoid brand/name ambiguity.
 
-- `google_maps_query`: display/search query used for map markers, such as a hotel name plus address.
-- `routing_query`: routing query used for driving-distance ranking and route-line calculation. This can be a stable official address when a more detailed loading-zone phrase is too fragile.
-- `google_place_id`: optional exact Google place ID. When present, the app can use it for routing/maps instead of only text queries.
-
-The existing `latitude` and `longitude` columns can stay in the CSV for reference, but the main app does not depend on them for visible map pins or nearest-pickup ranking.
+This means the map can still display Google’s best place marker, while the distance table uses stable route inputs.
 
 ## Updating pickup spots
 
@@ -111,7 +112,8 @@ Important columns:
 - `id`: stable machine-readable ID.
 - `name`, `address`, `city`, `state`, `zip`: displayed to users.
 - `google_maps_query`: Google map marker/search query.
-- `routing_query`: Google routing query for driving distance and the purple route line.
+- `routing_query`: Google routing query used for Google Maps URLs and browser route drawing.
+- `latitude`, `longitude`: used by Google Route Matrix for driving-distance ranking. Keep these near the actual pickup venue/loading area.
 - `google_place_id`: optional exact Google place ID. Leave blank until verified.
 - `google_query_note`: note explaining why the query was chosen.
 - `has_half_bus`, `has_full_bus`: controls which race sees the pickup.
@@ -130,6 +132,7 @@ Important columns:
 - `name`, `address`, `city`, `state`, `zip`: displayed to users.
 - `google_maps_query`: Google map marker/search query. Usually hotel name plus address.
 - `routing_query`: Google routing query. Usually the same as `google_maps_query`, but can be tuned separately.
+- `latitude`, `longitude`: used by Google Route Matrix for listed-hotel driving-distance ranking when present.
 - `google_place_id`: optional exact Google place ID. This is the best way to avoid hotel pin drift.
 - `area`, `category`, `return_shuttle_group`, `notes`: displayed/context fields.
 
@@ -163,6 +166,7 @@ This project requires **Streamlit 1.58 or newer** because it uses Streamlit's bu
 - On Streamlit Community Cloud, store `GOOGLE_MAPS_API_KEY` in Secrets.
 - Apply API key restrictions in Google Cloud, such as HTTP referrer restrictions for browser APIs and API restrictions to the specific Google Maps APIs used here.
 - Review Google Maps Platform billing/quotas before public launch.
+- If you still see old distance rankings after deploying, restart the Streamlit app or clear cached data. This version includes a cache-version bump to avoid reusing the earlier DECC route results.
 
 ## Important race-day disclaimer
 

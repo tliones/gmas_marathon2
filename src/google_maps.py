@@ -1,9 +1,9 @@
-"""Google Maps helpers for the bus pickup finder.
+"""Google Maps helpers for the Duluth race shuttle finder.
 
 The app can run without a Google Maps Platform key, but these helpers unlock:
-- Google driving distance ranking with Routes API Compute Route Matrix
-- Google route polylines with Routes API Compute Routes
+- Google driving-distance ranking with Routes API Compute Route Matrix
 - Google Maps JavaScript maps with Google-resolved marker positions
+- Google Maps JavaScript DirectionsRenderer route drawing on the main map
 """
 
 from __future__ import annotations
@@ -76,6 +76,24 @@ def clean_text(value: Any) -> str:
     return text
 
 
+def optional_float(value: Any) -> float | None:
+    """Return a float, or None for blank/invalid values."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    text = clean_text(value)
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
 def row_location_query(row: pd.Series) -> str:
     """Return the preferred Google Maps display/search query for a row."""
     query = clean_text(row.get("google_maps_query"))
@@ -92,9 +110,9 @@ def row_routing_query(row: pd.Series) -> str:
     """Return the preferred Google routing query for a row.
 
     Large sites can use a precise display/search query for map markers and a more
-    stable official address for Routes API calls. This avoids fragile searches like
-    "North Gate" failing and pushing a valid destination, such as DECC, to the bottom
-    of the ranked list.
+    stable official address for routing. If latitude/longitude are available, the
+    route ranking code uses those coordinates first; this query remains useful for
+    Google Maps URLs and browser-side DirectionsRenderer route drawing.
     """
     query = clean_text(row.get("routing_query"))
     if query:
@@ -107,15 +125,40 @@ def row_place_id(row: pd.Series) -> str:
     return clean_text(row.get("google_place_id"))
 
 
-def routes_waypoint(query: str = "", place_id: str = "") -> dict[str, str]:
-    """Build a Routes API waypoint using a place ID when available, otherwise address text."""
+def row_lat_lng(row: pd.Series) -> tuple[float | None, float | None]:
+    """Return route coordinates, preferring explicit routing columns when present."""
+    lat = optional_float(row.get("routing_latitude"))
+    lng = optional_float(row.get("routing_longitude"))
+    if lat is None or lng is None:
+        lat = optional_float(row.get("latitude"))
+        lng = optional_float(row.get("longitude"))
+    return lat, lng
+
+
+def routes_waypoint(
+    query: str = "",
+    place_id: str = "",
+    latitude: Any = None,
+    longitude: Any = None,
+) -> dict[str, Any]:
+    """Build a Routes API Waypoint.
+
+    The Routes API Waypoint accepts exactly one location type: geographic location,
+    place ID, address, or navigation point token. For route ranking, coordinates
+    are preferred when they are present because they avoid address/name ambiguity.
+    """
+    lat = optional_float(latitude)
+    lng = optional_float(longitude)
+    if lat is not None and lng is not None:
+        return {"location": {"latLng": {"latitude": lat, "longitude": lng}}}
+
     place_id = clean_text(place_id)
     query = clean_text(query)
     if place_id:
         return {"placeId": place_id}
-    if not query:
-        raise ValueError("A waypoint needs either a Google place ID or a query/address.")
-    return {"address": query}
+    if query:
+        return {"address": query}
+    raise ValueError("A waypoint needs coordinates, a Google place ID, or a query/address.")
 
 
 def parse_google_duration(value: Any) -> int | None:
@@ -131,17 +174,60 @@ def parse_google_duration(value: Any) -> int | None:
         return None
 
 
+def google_error_message(response: requests.Response) -> str:
+    """Extract the useful Google API error message from a non-2xx response."""
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            parts = [clean_text(error.get("status")), clean_text(error.get("message"))]
+            detail_bits: list[str] = []
+            for detail in error.get("details", []) or []:
+                if isinstance(detail, dict):
+                    reason = clean_text(detail.get("reason"))
+                    field_violations = detail.get("fieldViolations")
+                    if reason:
+                        detail_bits.append(reason)
+                    if isinstance(field_violations, list):
+                        for violation in field_violations:
+                            if isinstance(violation, dict):
+                                field = clean_text(violation.get("field"))
+                                description = clean_text(violation.get("description"))
+                                if field or description:
+                                    detail_bits.append(f"{field}: {description}".strip(": "))
+            message = " — ".join(part for part in parts if part)
+            if detail_bits:
+                message = f"{message} ({'; '.join(detail_bits)})" if message else "; ".join(detail_bits)
+            if message:
+                return message
+    return f"HTTP {response.status_code}: {clean_text(response.text)[:500]}"
+
+
+def raise_for_google_response(response: requests.Response) -> None:
+    """Raise a RuntimeError with Google's JSON error body instead of a generic HTTPError."""
+    if response.ok:
+        return
+    raise RuntimeError(google_error_message(response))
+
+
 def compute_driving_matrix(
     *,
     api_key: str,
     origin_query: str,
-    destinations: Iterable[dict[str, str]],
+    destinations: Iterable[dict[str, Any]],
+    origin_place_id: str = "",
+    origin_latitude: Any = None,
+    origin_longitude: Any = None,
     traffic_aware: bool = False,
 ) -> list[RouteResult]:
     """Rank one origin against many pickup destinations by Google driving distance.
 
     destinations must contain dictionaries with these keys:
-        id, query, place_id
+        id, query, place_id, latitude, longitude
     """
     api_key = clean_text(api_key)
     if not api_key:
@@ -152,9 +238,25 @@ def compute_driving_matrix(
         return []
 
     body = {
-        "origins": [{"waypoint": routes_waypoint(origin_query)}],
+        "origins": [
+            {
+                "waypoint": routes_waypoint(
+                    origin_query,
+                    origin_place_id,
+                    origin_latitude,
+                    origin_longitude,
+                )
+            }
+        ],
         "destinations": [
-            {"waypoint": routes_waypoint(dest.get("query", ""), dest.get("place_id", ""))}
+            {
+                "waypoint": routes_waypoint(
+                    dest.get("query", ""),
+                    dest.get("place_id", ""),
+                    dest.get("latitude"),
+                    dest.get("longitude"),
+                )
+            }
             for dest in dest_list
         ],
         "travelMode": "DRIVE",
@@ -169,7 +271,7 @@ def compute_driving_matrix(
     }
 
     response = requests.post(ROUTES_MATRIX_ENDPOINT, headers=headers, json=body, timeout=20)
-    response.raise_for_status()
+    raise_for_google_response(response)
     payload = response.json()
     if isinstance(payload, dict) and "error" in payload:
         message = payload.get("error", {}).get("message", "Google Routes API returned an error.")
@@ -214,26 +316,38 @@ def compute_route_polyline(
     api_key: str,
     origin_query: str,
     destination_query: str,
+    origin_place_id: str = "",
     destination_place_id: str = "",
+    origin_latitude: Any = None,
+    origin_longitude: Any = None,
+    destination_latitude: Any = None,
+    destination_longitude: Any = None,
     traffic_aware: bool = False,
 ) -> RoutePolyline:
     """Compute a selected driving route polyline with Google Routes API.
 
-    This is used to draw the selected route on the main Google map, instead of
-    showing a second embedded directions map below the overview.
+    The main app now draws selected routes in the browser with Google Maps
+    DirectionsRenderer. This helper is retained for scripts/tests and uses the
+    correct ComputeRoutes body shape: origin and destination are Waypoint objects
+    directly, not nested inside `waypoint`.
     """
     api_key = clean_text(api_key)
     if not api_key:
         raise ValueError("Missing GOOGLE_MAPS_API_KEY.")
 
     body = {
-        "origin": {"waypoint": routes_waypoint(origin_query)},
-        "destination": {"waypoint": routes_waypoint(destination_query, destination_place_id)},
+        "origin": routes_waypoint(origin_query, origin_place_id, origin_latitude, origin_longitude),
+        "destination": routes_waypoint(
+            destination_query,
+            destination_place_id,
+            destination_latitude,
+            destination_longitude,
+        ),
         "travelMode": "DRIVE",
         "routingPreference": "TRAFFIC_AWARE" if traffic_aware else "TRAFFIC_UNAWARE",
         "languageCode": "en-US",
         "units": "IMPERIAL",
-        "polylineQuality": "HIGH_QUALITY",
+        "polylineQuality": "OVERVIEW",
         "polylineEncoding": "ENCODED_POLYLINE",
     }
     headers = {
@@ -243,7 +357,7 @@ def compute_route_polyline(
     }
 
     response = requests.post(ROUTES_COMPUTE_ENDPOINT, headers=headers, json=body, timeout=20)
-    response.raise_for_status()
+    raise_for_google_response(response)
     payload = response.json()
     if isinstance(payload, dict) and "error" in payload:
         message = payload.get("error", {}).get("message", "Google Routes API returned an error.")
@@ -307,6 +421,7 @@ def _marker_payload(df: pd.DataFrame, *, kind: str) -> list[dict[str, str]]:
                 if note
                 else f"Return shuttle: {clean_text(row.get('return_shuttle_group'))}"
             )
+        lat, lng = row_lat_lng(row)
         payload.append(
             {
                 "id": clean_text(row.get("id")),
@@ -317,6 +432,8 @@ def _marker_payload(df: pd.DataFrame, *, kind: str) -> list[dict[str, str]]:
                 "address": clean_text(row.get("full_address")),
                 "note": note,
                 "kind": kind,
+                "lat": "" if lat is None else str(lat),
+                "lng": "" if lng is None else str(lng),
             }
         )
     return payload
@@ -332,19 +449,24 @@ def google_overview_map_html(
     selected_origin_id: str = "",
     origin_query: str = "",
     origin_label: str = "",
+    route_origin_query: str = "",
+    route_origin_place_id: str = "",
+    route_destination_query: str = "",
+    route_destination_place_id: str = "",
     route_polyline: str = "",
     height: int = 620,
 ) -> str:
-    """Return HTML for a Google map showing pickup/hotel markers and an optional route.
+    """Return HTML for a Google map with pickup/hotel markers and an optional route.
 
     Marker positions are resolved in the browser with Google Maps JavaScript:
     - `google_place_id` when present
     - Places text search from `google_maps_query` when possible
     - Geocoder fallback from `google_maps_query`
+    - CSV coordinates as a final fallback
 
-    The selected driving route is drawn from a Routes API encoded polyline computed
-    server-side. That keeps the route on the main map while using the same driving
-    route engine used for the pickup ranking.
+    The selected route is drawn in the browser with Google Maps DirectionsRenderer.
+    This avoids the app making a separate ComputeRoutes server call just to draw a
+    line, and keeps the route behavior closer to the Google Maps UI.
     """
     marker_data = _marker_payload(pickups, kind="pickup")
     if show_hotels and hotels is not None:
@@ -366,6 +488,8 @@ def google_overview_map_html(
                 "address": origin_query,
                 "note": "Selected starting location",
                 "kind": "origin",
+                "lat": "",
+                "lng": "",
             }
         )
 
@@ -375,6 +499,10 @@ def google_overview_map_html(
         "__SELECTED_PICKUP_ID__": json.dumps(clean_text(selected_pickup_id), ensure_ascii=False),
         "__SELECTED_ORIGIN_ID__": json.dumps(selected_origin_id, ensure_ascii=False),
         "__ROUTE_POLYLINE__": json.dumps(clean_text(route_polyline), ensure_ascii=False),
+        "__ROUTE_ORIGIN_QUERY__": json.dumps(clean_text(route_origin_query), ensure_ascii=False),
+        "__ROUTE_ORIGIN_PLACE_ID__": json.dumps(clean_text(route_origin_place_id), ensure_ascii=False),
+        "__ROUTE_DESTINATION_QUERY__": json.dumps(clean_text(route_destination_query), ensure_ascii=False),
+        "__ROUTE_DESTINATION_PLACE_ID__": json.dumps(clean_text(route_destination_place_id), ensure_ascii=False),
         "__API_KEY__": quote_plus(clean_text(api_key)),
     }
 
@@ -388,6 +516,10 @@ const markerData = __MARKER_JSON__;
 const selectedPickupId = __SELECTED_PICKUP_ID__;
 const selectedOriginId = __SELECTED_ORIGIN_ID__;
 const routePolyline = __ROUTE_POLYLINE__;
+const routeOriginQuery = __ROUTE_ORIGIN_QUERY__;
+const routeOriginPlaceId = __ROUTE_ORIGIN_PLACE_ID__;
+const routeDestinationQuery = __ROUTE_DESTINATION_QUERY__;
+const routeDestinationPlaceId = __ROUTE_DESTINATION_PLACE_ID__;
 
 function escapeHtml(value) {
   return String(value || "")
@@ -396,6 +528,18 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function parseCoordinate(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function waypointForDirections(query, placeId) {
+  if (placeId) {
+    return { placeId: placeId };
+  }
+  return query;
 }
 
 function initBusFinderMap() {
@@ -409,12 +553,24 @@ function initBusFinderMap() {
   });
   const geocoder = new google.maps.Geocoder();
   const placesService = google.maps.places ? new google.maps.places.PlacesService(map) : null;
+  const directionsService = new google.maps.DirectionsService();
+  const directionsRenderer = new google.maps.DirectionsRenderer({
+    map: map,
+    suppressMarkers: true,
+    preserveViewport: false,
+    polylineOptions: {
+      strokeColor: "#6A1B9A",
+      strokeOpacity: 0.9,
+      strokeWeight: 6,
+    },
+  });
   const bounds = new google.maps.LatLngBounds();
   const infoWindow = new google.maps.InfoWindow();
   let added = 0;
   let failed = 0;
   let processed = 0;
   let routeDrawn = false;
+  let routeFailed = false;
 
   function markerVisual(item, isSelectedPickup, isSelectedOrigin) {
     let color = "#1565C0";
@@ -454,7 +610,7 @@ function initBusFinderMap() {
 
   function statusText() {
     const legend = "P = pickup · H = hotel/lodging · S = selected start";
-    const route = routeDrawn ? " Selected driving route is shown in purple." : "";
+    const route = routeDrawn ? " Selected driving route is shown in purple." : (routeFailed ? " Selected route could not be drawn; use the Directions button." : "");
     return `${added} markers placed from Google locations; ${failed} not found. ${legend}.${route}`;
   }
 
@@ -470,14 +626,14 @@ function initBusFinderMap() {
     }
   }
 
-  function drawRoutePolyline() {
+  function drawEncodedRoutePolyline() {
     if (!routePolyline || !google.maps.geometry || !google.maps.geometry.encoding) {
-      return;
+      return false;
     }
     try {
       const path = google.maps.geometry.encoding.decodePath(routePolyline);
       if (!path || !path.length) {
-        return;
+        return false;
       }
       const line = new google.maps.Polyline({
         path: path,
@@ -492,10 +648,34 @@ function initBusFinderMap() {
       map.fitBounds(routeBounds, 64);
       routeDrawn = true;
       document.getElementById("map-status").innerText = statusText();
-      return line;
+      return true;
     } catch (err) {
-      console.warn("Could not draw route polyline", err);
+      console.warn("Could not draw encoded route polyline", err);
+      return false;
     }
+  }
+
+  function drawGoogleDirectionsRoute() {
+    if (!routeOriginQuery || !routeDestinationQuery) {
+      return;
+    }
+    directionsService.route(
+      {
+        origin: waypointForDirections(routeOriginQuery, routeOriginPlaceId),
+        destination: waypointForDirections(routeDestinationQuery, routeDestinationPlaceId),
+        travelMode: google.maps.TravelMode.DRIVING,
+      },
+      (result, status) => {
+        if (status === "OK" && result) {
+          directionsRenderer.setDirections(result);
+          routeDrawn = true;
+        } else {
+          routeFailed = true;
+          console.warn("Directions route could not be drawn", status);
+        }
+        document.getElementById("map-status").innerText = statusText();
+      }
+    );
   }
 
   function mapsUrlFor(item, resolvedPlaceId) {
@@ -534,13 +714,31 @@ function initBusFinderMap() {
     added += 1;
   }
 
+  function coordinateFallback(item) {
+    const lat = parseCoordinate(item.lat);
+    const lng = parseCoordinate(item.lng);
+    if (lat === null || lng === null) {
+      return null;
+    }
+    return {
+      location: new google.maps.LatLng(lat, lng),
+      formattedAddress: item.address || item.query || "",
+      placeId: item.place_id || "",
+    };
+  }
+
   function finish(item, resolved, sourceStatus) {
     processed += 1;
     if (resolved && resolved.location) {
       addResolvedMarker(item, resolved);
     } else {
-      failed += 1;
-      console.warn("Map marker could not be resolved", item.name, sourceStatus);
+      const fallback = coordinateFallback(item);
+      if (fallback) {
+        addResolvedMarker(item, fallback);
+      } else {
+        failed += 1;
+        console.warn("Map marker could not be resolved", item.name, sourceStatus);
+      }
     }
     if (processed === markerData.length) {
       fitMarkerBoundsIfNeeded();
@@ -596,7 +794,9 @@ function initBusFinderMap() {
     }
   }
 
-  drawRoutePolyline();
+  if (!drawEncodedRoutePolyline()) {
+    drawGoogleDirectionsRoute();
+  }
 
   if (!markerData.length) {
     document.getElementById("map-status").innerText = "No map locations are configured.";
