@@ -9,8 +9,8 @@ The app is centered around one main Google map: pickup and hotel pins are shown 
 - Shows a main Google map with bus pickup spots and hotel/lodging locations.
 - Lets a visitor choose a listed hotel/lodging spot or enter a custom address/place.
 - Lets a visitor choose their race and corral.
-- Ranks bus pickup spots by Google driving distance when `GOOGLE_MAPS_API_KEY` is configured.
-- Draws the selected Google driving route directly on the main map.
+- Ranks bus pickup spots by traffic-aware Google driving distance when `GOOGLE_MAPS_API_KEY` is configured.
+- Draws the selected traffic-aware Google driving route directly on the main map.
 - Shows the pickup selector and route details to the left of the map.
 - Shows the full pickup-options table underneath the map.
 - Keeps official loading-site PDF links next to each pickup.
@@ -22,7 +22,10 @@ This version keeps the simple three-part layout:
 
 1. **Left panel:** starting location, race/corral, hotel-pin toggle, pickup selector, and selected-pickup notes.
 2. **Main map:** all pickup/hotel markers plus the selected route line.
-3. **Bottom table:** all pickup options, sorted by Google driving distance when available.
+3. **Bottom table:** all pickup options, sorted by traffic-aware Google driving distance when available.
+
+
+This patch also removes the old user-facing **Use traffic-aware estimates** checkbox. Traffic-aware routing is now always on. The app uses `TRAFFIC_AWARE_OPTIMAL` for Google Routes API calls so the chosen route more closely matches what users see in Google Maps.
 
 It also fixes the DECC visual-route issue differently from the previous patch:
 
@@ -72,7 +75,7 @@ Without a Google Maps Platform key, the app still opens Google Maps direction li
 
 Create a Google Maps Platform API key and enable these APIs for the project:
 
-- **Routes API** — used for Route Matrix driving-distance ranking.
+- **Routes API** — used for traffic-aware Route Matrix driving-distance ranking and selected-route geometry.
 - **Maps JavaScript API** — used for the main all-location map and for drawing the selected route polyline.
 - **Places API / Places Library** — used by the map to resolve hotel and venue names to Google place locations when a place ID is not stored.
 
@@ -101,8 +104,8 @@ GOOGLE_MAPS_API_KEY = "paste-your-google-maps-platform-key-here"
 The app uses three related but separate ideas of location:
 
 - **Visible marker location:** resolved in the browser by Google Maps using `google_place_id`, `google_maps_query`, or the geocoder. CSV coordinates are the final fallback.
-- **Driving-distance ranking location:** sent to Google Route Matrix. For pickup destinations, the app prefers `routing_latitude` / `routing_longitude`, then falls back to `latitude` / `longitude`, then text. For listed hotels, it also sends hotel coordinates when available to avoid brand/name ambiguity.
-- **Selected route line:** requested from Google Routes API as encoded route geometry, then decoded and drawn on the main Google map. The route line uses `visual_route_query` when present; for DECC this is the simple Harbor Drive address.
+- **Driving-distance ranking location:** sent to Google Route Matrix using traffic-aware routing. For pickup destinations, the app prefers `routing_latitude` / `routing_longitude`, then falls back to `latitude` / `longitude`, then text. For listed hotels, it also sends hotel coordinates when available to avoid brand/name ambiguity.
+- **Selected route line:** requested from Google Routes API as traffic-aware encoded route geometry, then decoded and drawn on the main Google map. The route line uses `visual_route_query` when present; for DECC this is the simple Harbor Drive address.
 
 This means large venues can keep a readable search query for map display while using a practical vehicle-access point for distance calculations.
 
@@ -172,7 +175,7 @@ This project requires **Streamlit 1.58 or newer** because it uses Streamlit's bu
 - On Streamlit Community Cloud, store `GOOGLE_MAPS_API_KEY` in Secrets.
 - Apply API key restrictions in Google Cloud, such as HTTP referrer restrictions for browser APIs and API restrictions to the specific Google Maps APIs used here.
 - Review Google Maps Platform billing/quotas before public launch.
-- If you still see old distance rankings after deploying, restart the Streamlit app or clear cached data. This version includes a cache-version bump to avoid reusing earlier DECC route results.
+- If you still see old distance rankings after deploying, restart the Streamlit app or clear cached data. This version includes a cache-version bump to avoid reusing earlier DECC route results and earlier traffic-unaware route results.
 
 ## Important race-day disclaimer
 

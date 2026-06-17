@@ -1,7 +1,7 @@
 """Google Maps helpers for the Duluth race shuttle finder.
 
 The app can run without a Google Maps Platform key, but these helpers unlock:
-- Google driving-distance ranking with Routes API Compute Route Matrix
+- Traffic-aware Google driving-distance ranking with Routes API Compute Route Matrix
 - Google Maps JavaScript maps with Google-resolved marker positions
 - Routes API selected-route polylines drawn on the main Google map
 """
@@ -236,9 +236,13 @@ def compute_driving_matrix(
     origin_place_id: str = "",
     origin_latitude: Any = None,
     origin_longitude: Any = None,
-    traffic_aware: bool = False,
+    traffic_aware: bool = True,
 ) -> list[RouteResult]:
     """Rank one origin against many pickup destinations by Google driving distance.
+
+    When traffic_aware is true, the app uses TRAFFIC_AWARE_OPTIMAL. That is slower
+    than the basic mode, but with one origin and a small number of pickup spots it
+    gives routes that more closely match Google Maps.
 
     destinations must contain dictionaries with these keys:
         id, query, place_id, latitude, longitude
@@ -274,7 +278,7 @@ def compute_driving_matrix(
             for dest in dest_list
         ],
         "travelMode": "DRIVE",
-        "routingPreference": "TRAFFIC_AWARE" if traffic_aware else "TRAFFIC_UNAWARE",
+        "routingPreference": "TRAFFIC_AWARE_OPTIMAL" if traffic_aware else "TRAFFIC_UNAWARE",
         "languageCode": "en-US",
         "units": "IMPERIAL",
     }
@@ -336,9 +340,12 @@ def compute_route_polyline(
     origin_longitude: Any = None,
     destination_latitude: Any = None,
     destination_longitude: Any = None,
-    traffic_aware: bool = False,
+    traffic_aware: bool = True,
 ) -> RoutePolyline:
     """Compute a selected driving route polyline with Google Routes API.
+
+    When traffic_aware is true, the selected route uses TRAFFIC_AWARE_OPTIMAL so
+    the drawn route better matches the route a visitor sees in Google Maps.
 
     The main app uses this to get the selected route geometry. ComputeRoutes
     expects origin and destination as Waypoint objects directly, not nested
@@ -357,7 +364,7 @@ def compute_route_polyline(
             destination_longitude,
         ),
         "travelMode": "DRIVE",
-        "routingPreference": "TRAFFIC_AWARE" if traffic_aware else "TRAFFIC_UNAWARE",
+        "routingPreference": "TRAFFIC_AWARE_OPTIMAL" if traffic_aware else "TRAFFIC_UNAWARE",
         "languageCode": "en-US",
         "units": "IMPERIAL",
         "polylineQuality": "OVERVIEW",

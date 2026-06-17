@@ -38,7 +38,8 @@ st.set_page_config(
 
 # Bump this when route-ranking inputs change so Streamlit Cloud does not reuse
 # old Google route matrix results from earlier app versions.
-ROUTE_CACHE_VERSION = "2026-06-17-decc-loading-anchor-v7"
+ROUTE_CACHE_VERSION = "2026-06-17-traffic-aware-always-on-v7"
+TRAFFIC_AWARE_ROUTING = True
 
 
 @st.cache_data(show_spinner=False)
@@ -113,8 +114,6 @@ def cached_selected_route_polyline(
     origin_place_id: str,
     destination_query: str,
     destination_place_id: str,
-    destination_latitude: str,
-    destination_longitude: str,
     traffic_aware: bool,
 ) -> dict[str, Any]:
     """Cached wrapper for the selected Google Routes API polyline.
@@ -132,8 +131,8 @@ def cached_selected_route_polyline(
         destination_place_id=destination_place_id,
         origin_latitude="",
         origin_longitude="",
-        destination_latitude=destination_latitude,
-        destination_longitude=destination_longitude,
+        destination_latitude="",
+        destination_longitude="",
         traffic_aware=traffic_aware,
     )
     return {
@@ -218,7 +217,7 @@ def make_ranked_pickups(
         stringify_coord(search.get("origin_latitude")),
         stringify_coord(search.get("origin_longitude")),
         destination_tuple(pickups),
-        bool(search.get("traffic_aware", False)),
+        TRAFFIC_AWARE_ROUTING,
     )
     route_df = pd.DataFrame(routes)
     ranked = pickups.merge(route_df, on="id", how="left")
@@ -476,11 +475,7 @@ def main() -> None:
             race_key = str(RACE_CONFIG[race_name]["key"])
             corral = st.selectbox("Corral", RACE_CONFIG[race_name]["corrals"])
             show_hotels = st.checkbox("Show hotel pins", value=True)
-            traffic_aware = st.checkbox(
-                "Use traffic-aware estimates",
-                value=False,
-                help="Off keeps ranking closer to normal planning distance. On uses traffic-aware estimates where Google supports them.",
-            )
+            st.caption("Traffic-aware Google routing is always on for ranking and the purple route line.")
             submitted = st.form_submit_button("Update map", type="primary", width="stretch")
 
         if submitted:
@@ -500,7 +495,7 @@ def main() -> None:
                     "race_key": race_key,
                     "corral": corral,
                     "show_hotels": show_hotels,
-                    "traffic_aware": traffic_aware,
+                    "traffic_aware": TRAFFIC_AWARE_ROUTING,
                 }
 
     search = st.session_state.get("last_search")
@@ -581,7 +576,7 @@ def main() -> None:
 
     with map_col:
         st.subheader("Map")
-        st.caption("Pickup and hotel markers are resolved by Google Maps. The purple route is drawn from Google Routes API route geometry; distance ranking uses Google Route Matrix.")
+        st.caption("Pickup and hotel markers are resolved by Google Maps. The purple route and pickup ranking use traffic-aware Google Routes API results.")
         if api_key:
             route_origin_query = ""
             route_origin_place_id = ""
@@ -596,14 +591,8 @@ def main() -> None:
             if search and selected_row is not None:
                 route_origin_query = search.get("origin_query") or search.get("origin_map_query", "")
                 route_origin_place_id = search.get("origin_place_id", "")
-                if clean_text(selected_row.get("id")) == "decc_bus":
-                    # Load at the Railroad St north gate (Canal Park side), not the
-                    # harbor-facing 350 Harbor Dr frontage, which forces the southern loop.
-                    route_destination_latitude = "46.7820"
-                    route_destination_longitude = "-92.0967"
-                else:
-                    route_destination_latitude = ""
-                    route_destination_longitude = ""
+                route_origin_latitude = ""
+                route_origin_longitude = ""
                 route_destination_query = clean_text(selected_row.get("destination_visual_route_query")) or clean_text(selected_row.get("destination_query"))
                 route_destination_place_id = "" if clean_text(selected_row.get("id")) == "decc_bus" else clean_text(selected_row.get("destination_place_id"))
                 route_destination_latitude = ""
@@ -617,9 +606,7 @@ def main() -> None:
                         route_origin_place_id,
                         route_destination_query,
                         route_destination_place_id,
-                        route_destination_latitude,
-                        route_destination_longitude,
-                        bool(search.get("traffic_aware", False)),
+                        TRAFFIC_AWARE_ROUTING,
                     )
                     route_polyline = clean_text(selected_route.get("encoded_polyline"))
                     if not route_polyline and clean_text(selected_route.get("error")):
@@ -659,7 +646,7 @@ def main() -> None:
     if not search:
         st.caption("Choose a starting location to sort this table by Google driving distance.")
     else:
-        st.caption("Sorted by Google driving distance when available. The table uses Google Route Matrix; the map route uses Google Routes API geometry.")
+        st.caption("Sorted by traffic-aware Google driving distance when available. The map route uses the same traffic-aware routing mode.")
     render_rank_table(ranked, show_distance=show_distance)
 
     with st.expander("Return shuttles and other transportation"):
