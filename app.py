@@ -36,7 +36,7 @@ st.set_page_config(
 
 # Bump this when route-ranking inputs change so Streamlit Cloud does not reuse
 # old Google route matrix results from earlier app versions.
-ROUTE_CACHE_VERSION = "2026-06-17-coordinate-routing-decc-fix-v3"
+ROUTE_CACHE_VERSION = "2026-06-17-route-anchor-drawing-v4"
 
 
 @st.cache_data(show_spinner=False)
@@ -539,17 +539,26 @@ def main() -> None:
 
     with map_col:
         st.subheader("Map")
-        st.caption("Pickup and hotel markers are resolved by Google Maps. Selecting a pickup draws the driving route in purple.")
+        st.caption("Pickup and hotel markers are resolved by Google Maps. The selected driving route uses the same route anchors as the distance ranking.")
         if api_key:
             route_origin_query = ""
             route_origin_place_id = ""
+            route_origin_latitude = ""
+            route_origin_longitude = ""
             route_destination_query = ""
             route_destination_place_id = ""
+            route_destination_latitude = ""
+            route_destination_longitude = ""
             if search and selected_row is not None:
                 route_origin_query = search.get("origin_map_query") or search.get("origin_query", "")
                 route_origin_place_id = search.get("origin_place_id", "")
+                route_origin_latitude = search.get("origin_latitude", "")
+                route_origin_longitude = search.get("origin_longitude", "")
+                dest_lat, dest_lng = row_lat_lng(selected_row)
                 route_destination_query = clean_text(selected_row.get("destination_query"))
                 route_destination_place_id = clean_text(selected_row.get("destination_place_id"))
+                route_destination_latitude = dest_lat
+                route_destination_longitude = dest_lng
 
             overview_html = google_overview_map_html(
                 api_key=api_key,
@@ -560,10 +569,16 @@ def main() -> None:
                 selected_origin_id=search["origin_id"] if search else "",
                 origin_query=search.get("origin_map_query") or search.get("origin_query") if search else "",
                 origin_label=search["origin_label"] if search else "",
+                origin_latitude=search.get("origin_latitude", "") if search else "",
+                origin_longitude=search.get("origin_longitude", "") if search else "",
                 route_origin_query=route_origin_query,
                 route_origin_place_id=route_origin_place_id,
+                route_origin_latitude=route_origin_latitude,
+                route_origin_longitude=route_origin_longitude,
                 route_destination_query=route_destination_query,
                 route_destination_place_id=route_destination_place_id,
+                route_destination_latitude=route_destination_latitude,
+                route_destination_longitude=route_destination_longitude,
                 height=700,
             )
             render_iframe(overview_html, height=740)

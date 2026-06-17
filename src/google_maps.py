@@ -449,10 +449,16 @@ def google_overview_map_html(
     selected_origin_id: str = "",
     origin_query: str = "",
     origin_label: str = "",
+    origin_latitude: Any = None,
+    origin_longitude: Any = None,
     route_origin_query: str = "",
     route_origin_place_id: str = "",
+    route_origin_latitude: Any = None,
+    route_origin_longitude: Any = None,
     route_destination_query: str = "",
     route_destination_place_id: str = "",
+    route_destination_latitude: Any = None,
+    route_destination_longitude: Any = None,
     route_polyline: str = "",
     height: int = 620,
 ) -> str:
@@ -465,8 +471,9 @@ def google_overview_map_html(
     - CSV coordinates as a final fallback
 
     The selected route is drawn in the browser with Google Maps DirectionsRenderer.
-    This avoids the app making a separate ComputeRoutes server call just to draw a
-    line, and keeps the route behavior closer to the Google Maps UI.
+    When available, exact latitude/longitude route anchors are used before text
+    search strings. This keeps the purple route tied to the same points used for
+    driving-distance ranking and avoids odd detours caused by ambiguous venue names.
     """
     marker_data = _marker_payload(pickups, kind="pickup")
     if show_hotels and hotels is not None:
@@ -488,8 +495,8 @@ def google_overview_map_html(
                 "address": origin_query,
                 "note": "Selected starting location",
                 "kind": "origin",
-                "lat": "",
-                "lng": "",
+                "lat": "" if optional_float(origin_latitude) is None else str(optional_float(origin_latitude)),
+                "lng": "" if optional_float(origin_longitude) is None else str(optional_float(origin_longitude)),
             }
         )
 
@@ -501,8 +508,12 @@ def google_overview_map_html(
         "__ROUTE_POLYLINE__": json.dumps(clean_text(route_polyline), ensure_ascii=False),
         "__ROUTE_ORIGIN_QUERY__": json.dumps(clean_text(route_origin_query), ensure_ascii=False),
         "__ROUTE_ORIGIN_PLACE_ID__": json.dumps(clean_text(route_origin_place_id), ensure_ascii=False),
+        "__ROUTE_ORIGIN_LAT__": json.dumps("" if optional_float(route_origin_latitude) is None else str(optional_float(route_origin_latitude))),
+        "__ROUTE_ORIGIN_LNG__": json.dumps("" if optional_float(route_origin_longitude) is None else str(optional_float(route_origin_longitude))),
         "__ROUTE_DESTINATION_QUERY__": json.dumps(clean_text(route_destination_query), ensure_ascii=False),
         "__ROUTE_DESTINATION_PLACE_ID__": json.dumps(clean_text(route_destination_place_id), ensure_ascii=False),
+        "__ROUTE_DESTINATION_LAT__": json.dumps("" if optional_float(route_destination_latitude) is None else str(optional_float(route_destination_latitude))),
+        "__ROUTE_DESTINATION_LNG__": json.dumps("" if optional_float(route_destination_longitude) is None else str(optional_float(route_destination_longitude))),
         "__API_KEY__": quote_plus(clean_text(api_key)),
     }
 
@@ -518,8 +529,12 @@ const selectedOriginId = __SELECTED_ORIGIN_ID__;
 const routePolyline = __ROUTE_POLYLINE__;
 const routeOriginQuery = __ROUTE_ORIGIN_QUERY__;
 const routeOriginPlaceId = __ROUTE_ORIGIN_PLACE_ID__;
+const routeOriginLat = __ROUTE_ORIGIN_LAT__;
+const routeOriginLng = __ROUTE_ORIGIN_LNG__;
 const routeDestinationQuery = __ROUTE_DESTINATION_QUERY__;
 const routeDestinationPlaceId = __ROUTE_DESTINATION_PLACE_ID__;
+const routeDestinationLat = __ROUTE_DESTINATION_LAT__;
+const routeDestinationLng = __ROUTE_DESTINATION_LNG__;
 
 function escapeHtml(value) {
   return String(value || "")
@@ -535,7 +550,20 @@ function parseCoordinate(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function waypointForDirections(query, placeId) {
+function latLngFromPair(latValue, lngValue) {
+  const lat = parseCoordinate(latValue);
+  const lng = parseCoordinate(lngValue);
+  if (lat === null || lng === null) {
+    return null;
+  }
+  return new google.maps.LatLng(lat, lng);
+}
+
+function waypointForDirections(query, placeId, latValue, lngValue) {
+  const point = latLngFromPair(latValue, lngValue);
+  if (point) {
+    return point;
+  }
   if (placeId) {
     return { placeId: placeId };
   }
@@ -656,14 +684,18 @@ function initBusFinderMap() {
   }
 
   function drawGoogleDirectionsRoute() {
-    if (!routeOriginQuery || !routeDestinationQuery) {
+    const origin = waypointForDirections(routeOriginQuery, routeOriginPlaceId, routeOriginLat, routeOriginLng);
+    const destination = waypointForDirections(routeDestinationQuery, routeDestinationPlaceId, routeDestinationLat, routeDestinationLng);
+    if (!origin || !destination) {
       return;
     }
     directionsService.route(
       {
-        origin: waypointForDirections(routeOriginQuery, routeOriginPlaceId),
-        destination: waypointForDirections(routeDestinationQuery, routeDestinationPlaceId),
+        origin: origin,
+        destination: destination,
         travelMode: google.maps.TravelMode.DRIVING,
+        provideRouteAlternatives: false,
+        region: "US",
       },
       (result, status) => {
         if (status === "OK" && result) {
@@ -767,6 +799,15 @@ function initBusFinderMap() {
   }
 
   function resolveItem(item) {
+    // For the selected start/pickup, prefer configured route anchors so the
+    // visible marker and the purple route use the same endpoint. Other hotel
+    // markers still use Google place resolution first.
+    const configured = coordinateFallback(item);
+    const isRouteEndpoint = item.id === selectedPickupId || item.id === selectedOriginId || item.kind === "origin";
+    if (configured && isRouteEndpoint) {
+      finish(item, configured, "configured route anchor OK");
+      return;
+    }
     if (item.place_id) {
       geocodeItem(item, "place_id");
       return;
