@@ -12,20 +12,22 @@ The app is centered around one main Google map: pickup and hotel pins are shown 
 - Ranks bus pickup spots by traffic-aware Google driving distance when `GOOGLE_MAPS_API_KEY` is configured.
 - Draws the selected traffic-aware Google driving route directly on the main map.
 - Shows the pickup selector and route details to the left of the map.
-- Shows the full pickup-options table underneath the map.
+- Keeps the main Plan route view compact so most users do not need to scroll.
+- Moves the full pickup-options table into a separate **Compare pickups** tab.
+- Keeps return shuttles and race-weekend transportation notes in their own tab.
 - Keeps official loading-site PDF links next to each pickup.
-- Includes return shuttle and other transportation notes in a collapsed section.
 
 ## Latest changes
 
-This version keeps the simple three-part layout:
+This version changes the layout to a cleaner tabbed design:
 
-1. **Left panel:** starting location, race/corral, hotel-pin toggle, pickup selector, and selected-pickup notes.
-2. **Main map:** all pickup/hotel markers plus the selected route line.
-3. **Bottom table:** all pickup options, sorted by traffic-aware Google driving distance when available.
+1. **Plan route:** compact controls on the left, large Google map on the right, and the selected driving route drawn directly on the map.
+2. **Compare pickups:** the full pickup-options table, sorted by traffic-aware Google driving distance after a starting location is chosen.
+3. **Return shuttles + tips:** return-bus destinations, bike valet, DTA, trolley, skywalk, and Lakewalk notes.
 
+The main Plan route tab intentionally removes the table from below the map so the core workflow fits better on one screen.
 
-This patch also removes the old user-facing **Use traffic-aware estimates** checkbox. Traffic-aware routing is now always on. The app uses `TRAFFIC_AWARE_OPTIMAL` for Google Routes API calls so the chosen route more closely matches what users see in Google Maps.
+Traffic-aware routing is always on. The app uses `TRAFFIC_AWARE_OPTIMAL` for Google Routes API calls so the chosen route more closely matches what users see in Google Maps.
 
 It also fixes the DECC visual-route issue differently from the previous patch:
 
@@ -145,7 +147,7 @@ Important columns:
 - `google_place_id`: optional exact Google place ID. This is the best way to avoid hotel pin drift.
 - `area`, `category`, `return_shuttle_group`, `notes`: displayed/context fields.
 
-Hotel markers are shown on the overview map by default. Users can turn them off with the `Show hotel pins` checkbox when they want a less crowded pickup-only view.
+Hotel markers are shown on the Plan route map by default. Users can turn them off with the `Show hotel pins` checkbox when they want a less crowded pickup-only view.
 
 ## Optional: resolve Google place IDs
 
